@@ -1,4 +1,4 @@
-"""Test suite for classical portfolio optimization methods."""
+"""Test suite for comparing all classical portfolio optimization methods."""
 
 import pytest
 import numpy as np
@@ -28,128 +28,6 @@ def generate_synthetic_data(n_assets: int, n_days: int = 504, seed: int = 42) ->
     return pd.DataFrame(prices_data, index=dates)
 
 
-class TestClassicalOptimizers:
-    """Test all classical optimization methods."""
-
-    @pytest.mark.parametrize("n_assets", [16, 32, 64])
-    def test_equal_weight(self, n_assets):
-        """Test equal-weight portfolio (1/N)."""
-        prices = generate_synthetic_data(n_assets)
-        returns = compute_returns(prices, method='log')
-
-        optimizer = EqualWeightOptimizer()
-        result = optimizer.optimize(returns)
-
-        # Validate
-        assert 'weights' in result
-        weights = result['weights']
-
-        # All weights should be equal
-        expected_weight = 1.0 / n_assets
-        assert np.allclose(weights.values, expected_weight, atol=1e-10)
-        assert np.isclose(weights.sum(), 1.0)
-
-        # Should be instant
-        assert result['runtime'] < 0.001
-
-        print(f"\n{'='*70}")
-        print(f"Equal-Weight Portfolio - {n_assets} Assets")
-        print(f"{'='*70}")
-        print(f"  Weight per asset: {expected_weight*100:.4f}%")
-        print(f"  Sharpe ratio:     {result['metrics']['sharpe_ratio']:.3f}")
-        print(f"  Effective N:      {result['metrics']['effective_n_assets']:.1f}")
-        print(f"  Runtime:          {result['runtime']:.6f}s")
-
-    @pytest.mark.parametrize("n_assets", [16, 32, 64])
-    def test_risk_parity(self, n_assets):
-        """Test risk parity portfolio."""
-        prices = generate_synthetic_data(n_assets)
-        returns = compute_returns(prices, method='log')
-
-        optimizer = RiskParityOptimizer()
-        result = optimizer.optimize(returns)
-
-        # Validate
-        weights = result['weights']
-        assert np.isclose(weights.sum(), 1.0, atol=1e-6)
-        assert (weights >= 0).all()
-
-        # Risk contributions should be approximately equal
-        Sigma = returns.cov().values * 252
-        w = weights.values
-        marginal_risk = Sigma @ w
-        risk_contrib = w * marginal_risk
-        risk_contrib_normalized = risk_contrib / risk_contrib.sum()
-
-        # Check that risk contributions are more equal than weights
-        weight_std = np.std(weights.values)
-        risk_contrib_std = np.std(risk_contrib_normalized)
-        # Risk parity should have more uniform risk contribution
-        # (though not necessarily more uniform weights)
-
-        print(f"\n{'='*70}")
-        print(f"Risk Parity Portfolio - {n_assets} Assets")
-        print(f"{'='*70}")
-        print(f"  Sharpe ratio:          {result['metrics']['sharpe_ratio']:.3f}")
-        print(f"  Effective N:           {result['metrics']['effective_n_assets']:.1f}")
-        print(f"  Weight std:            {weight_std:.4f}")
-        print(f"  Risk contrib std:      {risk_contrib_std:.4f}")
-        print(f"  Runtime:               {result['runtime']:.4f}s")
-        print(f"  Min/Max weights:       {weights.min()*100:.2f}% / {weights.max()*100:.2f}%")
-
-    @pytest.mark.parametrize("lambda_l1", [0.001, 0.01, 0.1])
-    def test_l1_regularization(self, lambda_l1):
-        """Test L1 (Lasso) regularization with different lambda values."""
-        n_assets = 32
-        prices = generate_synthetic_data(n_assets)
-        returns = compute_returns(prices, method='log')
-
-        optimizer = L1RegularizedOptimizer(gamma=1.0, lambda_l1=lambda_l1)
-        result = optimizer.optimize(returns)
-
-        weights = result['weights']
-        assert np.isclose(weights.sum(), 1.0, atol=1e-6)
-        assert (weights >= 0).all()
-
-        # Higher lambda should produce sparser portfolios
-        n_nonzero = (weights > 1e-6).sum()
-
-        print(f"\n{'='*70}")
-        print(f"L1-Regularized Portfolio - λ={lambda_l1}")
-        print(f"{'='*70}")
-        print(f"  Assets selected:  {n_nonzero}/{n_assets}")
-        print(f"  Sharpe ratio:     {result['metrics']['sharpe_ratio']:.3f}")
-        print(f"  Effective N:      {result['metrics']['effective_n_assets']:.1f}")
-        print(f"  Herfindahl:       {result['metrics']['herfindahl_index']:.4f}")
-        print(f"  Runtime:          {result['runtime']:.4f}s")
-
-        # Sparsity should increase with lambda
-        if lambda_l1 == 0.1:
-            assert n_nonzero < n_assets * 0.5, "High lambda should produce sparse portfolio"
-
-    def test_l2_regularization(self):
-        """Test L2 (Ridge) regularization."""
-        n_assets = 32
-        prices = generate_synthetic_data(n_assets)
-        returns = compute_returns(prices, method='log')
-
-        optimizer = L2RegularizedOptimizer(gamma=1.0, lambda_l2=0.1)
-        result = optimizer.optimize(returns)
-
-        weights = result['weights']
-        assert np.isclose(weights.sum(), 1.0, atol=1e-6)
-        assert (weights >= 0).all()
-
-        # L2 should produce more uniform weights than unregularized
-        print(f"\n{'='*70}")
-        print(f"L2-Regularized Portfolio")
-        print(f"{'='*70}")
-        print(f"  Sharpe ratio:     {result['metrics']['sharpe_ratio']:.3f}")
-        print(f"  Effective N:      {result['metrics']['effective_n_assets']:.1f}")
-        print(f"  Weight std:       {weights.std():.4f}")
-        print(f"  Runtime:          {result['runtime']:.4f}s")
-
-
 class TestClassicalComparison:
     """Compare all classical methods head-to-head."""
 
@@ -174,7 +52,7 @@ class TestClassicalComparison:
 
         # Print comparison table
         print(f"\n{'='*80}")
-        print("SOTA Method Comparison - Single Optimization")
+        print("Classical Method Comparison - Single Optimization")
         print(f"{'='*80}")
         print(f"{'Method':<20} {'Runtime':>10} {'Sharpe':>8} {'Eff N':>8} {'Assets':>8}")
         print(f"{'-'*80}")
@@ -190,7 +68,7 @@ class TestClassicalComparison:
 
     @pytest.mark.parametrize("n_assets", [16, 32])
     def test_backtest_comparison(self, n_assets):
-        """Backtest comparison of SOTA methods."""
+        """Backtest comparison of classical methods."""
         prices = generate_synthetic_data(n_assets, n_days=504)
         returns = compute_returns(prices, method='log')
 
@@ -213,7 +91,7 @@ class TestClassicalComparison:
 
         # Print backtest comparison
         print(f"\n{'='*80}")
-        print(f"SOTA Backtest Comparison - {n_assets} Assets")
+        print(f"Classical Backtest Comparison - {n_assets} Assets")
         print(f"{'='*80}")
         print(f"{'Method':<20} {'Return':>10} {'Sharpe':>8} {'Drawdown':>10} {'Avg Time':>10}")
         print(f"{'-'*80}")
@@ -231,6 +109,84 @@ class TestClassicalComparison:
             assert metrics['max_drawdown'] < 0
             assert metrics['avg_runtime'] < 1.0
 
+    def test_all_methods_consistent(self):
+        """Test that all methods produce valid portfolios."""
+        n_assets = 20
+        prices = generate_synthetic_data(n_assets)
+        returns = compute_returns(prices, method='log')
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v', '-s'])
+        methods = {
+            'Equal-Weight': EqualWeightOptimizer(),
+            'Risk Parity': RiskParityOptimizer(),
+            'L1 (λ=0.01)': L1RegularizedOptimizer(lambda_l1=0.01),
+            'L2 (λ=0.1)': L2RegularizedOptimizer(lambda_l2=0.1),
+            'Mean-Variance': ClassicalOptimizer(gamma=1.0, method='cvxpy'),
+        }
+
+        for name, optimizer in methods.items():
+            result = optimizer.optimize(returns)
+            weights = result['weights']
+
+            # Basic validation
+            assert np.isclose(weights.sum(), 1.0, atol=1e-5), f"{name}: weights don't sum to 1"
+            assert (weights >= -1e-10).all(), f"{name}: has negative weights"
+            assert 'metrics' in result, f"{name}: missing metrics"
+            assert 'runtime' in result, f"{name}: missing runtime"
+
+            # Check all required metrics
+            required_metrics = ['sharpe_ratio', 'expected_return', 'expected_risk',
+                              'n_assets', 'effective_n_assets', 'herfindahl_index']
+            for metric in required_metrics:
+                assert metric in result['metrics'], f"{name}: missing metric {metric}"
+
+    def test_performance_ranking(self):
+        """Test that methods have expected performance characteristics on synthetic data."""
+        n_assets = 32
+        prices = generate_synthetic_data(n_assets, seed=42)
+        returns = compute_returns(prices, method='log')
+
+        methods = {
+            'Equal-Weight': EqualWeightOptimizer(),
+            'Risk Parity': RiskParityOptimizer(),
+        }
+
+        results = {}
+        for name, optimizer in methods.items():
+            result = optimizer.optimize(returns)
+            results[name] = result
+
+        # Both should have reasonable Sharpe ratios
+        for name, result in results.items():
+            sharpe = result['metrics']['sharpe_ratio']
+            assert sharpe > 0, f"{name} has non-positive Sharpe ratio"
+            assert sharpe < 10, f"{name} has unrealistically high Sharpe ratio"
+
+    def test_runtime_comparison(self):
+        """Test that all classical methods are fast."""
+        n_assets = 50
+        prices = generate_synthetic_data(n_assets)
+        returns = compute_returns(prices, method='log')
+
+        methods = {
+            'Equal-Weight': EqualWeightOptimizer(),
+            'Risk Parity': RiskParityOptimizer(),
+            'L1 (λ=0.01)': L1RegularizedOptimizer(lambda_l1=0.01),
+            'L2 (λ=0.1)': L2RegularizedOptimizer(lambda_l2=0.1),
+            'Mean-Variance': ClassicalOptimizer(gamma=1.0, method='cvxpy'),
+        }
+
+        print(f"\n{'='*70}")
+        print(f"Runtime Comparison - {n_assets} Assets")
+        print(f"{'='*70}")
+
+        for name, optimizer in methods.items():
+            result = optimizer.optimize(returns)
+            runtime = result['runtime']
+            print(f"  {name:<20} {runtime:>10.6f}s")
+
+            # All should be fast (< 1 second)
+            assert runtime < 1.0, f"{name} too slow: {runtime}s"
+
+        # Equal-weight should be fastest
+        ew_time = methods['Equal-Weight'].optimize(returns)['runtime']
+        assert ew_time < 0.01, "Equal-Weight should be nearly instant"

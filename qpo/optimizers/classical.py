@@ -232,9 +232,15 @@ class ClassicalOptimizer:
         # Number of assets with non-zero weights
         n_assets = int(np.sum(w_arr > 1e-6))
 
+        # Effective number of assets (1 / Herfindahl index)
+        herfindahl = np.sum(w_arr ** 2)
+        effective_n = 1 / herfindahl if herfindahl > 0 else 0
+
         return {
             'expected_return': float(exp_return),
             'expected_risk': float(exp_risk),
             'sharpe_ratio': float(sharpe),
-            'n_assets': n_assets
+            'n_assets': n_assets,
+            'herfindahl_index': float(herfindahl),
+            'effective_n_assets': float(effective_n)
         }
