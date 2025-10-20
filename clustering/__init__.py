@@ -8,6 +8,7 @@ from .base import BaseClusterer
 
 # Alternative clustering methods
 from .correlation import CorrelationClusterer
+from .covariance import CovarianceClusterer
 from .returns_based import ReturnsClusterer
 from .volatility import VolatilityClusterer
 from .sector import SectorClusterer
@@ -24,6 +25,7 @@ __all__ = [
 
     # Alternative methods
     'CorrelationClusterer',
+    'CovarianceClusterer',
     'ReturnsClusterer',
     'VolatilityClusterer',
     'SectorClusterer',

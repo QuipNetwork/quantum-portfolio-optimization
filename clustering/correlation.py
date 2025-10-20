@@ -17,7 +17,8 @@ class CorrelationClusterer(BaseClusterer):
                  max_cluster_size: int = 18,
                  n_bits: int = 10,
                  linkage_method: str = 'ward',
-                 use_absolute: bool = True):
+                 use_absolute: bool = True,
+                 target_cluster_size: int = None):
         """
         Initialize correlation clusterer.
 
@@ -28,7 +29,7 @@ class CorrelationClusterer(BaseClusterer):
             use_absolute: If True, use |correlation| (ignores direction).
                          If False, negative correlation = far apart.
         """
-        super().__init__(max_cluster_size, n_bits, linkage_method)
+        super().__init__(max_cluster_size, n_bits, linkage_method, target_cluster_size=target_cluster_size)
         self.use_absolute = use_absolute
 
     def compute_distance_matrix(self, returns: pd.DataFrame) -> np.ndarray:

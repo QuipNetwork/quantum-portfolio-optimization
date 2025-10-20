@@ -20,7 +20,8 @@ class GraphClusterer(BaseClusterer):
                  max_cluster_size: int = 18,
                  n_bits: int = 10,
                  correlation_threshold: float = 0.5,
-                 algorithm: str = 'louvain'):
+                 algorithm: str = 'louvain',
+                 target_cluster_size: int = None):
         """
         Initialize graph-based clusterer.
 
@@ -30,7 +31,7 @@ class GraphClusterer(BaseClusterer):
             correlation_threshold: Minimum |correlation| to create edge (default 0.5)
             algorithm: Community detection algorithm ('louvain', 'greedy', 'label_prop')
         """
-        super().__init__(max_cluster_size, n_bits, linkage_method='ward')
+        super().__init__(max_cluster_size, n_bits, linkage_method='ward', target_cluster_size=target_cluster_size)
         self.correlation_threshold = correlation_threshold
         self.algorithm = algorithm
 

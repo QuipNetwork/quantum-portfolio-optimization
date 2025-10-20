@@ -23,7 +23,8 @@ class SectorClusterer(BaseClusterer):
                  max_cluster_size: int = 18,
                  n_bits: int = 10,
                  sector_map: Optional[Union[Dict[str, str], str, Path]] = None,
-                 use_industry: bool = False):
+                 use_industry: bool = False,
+                 target_cluster_size: int = None):
         """
         Initialize sector-based clusterer.
 
@@ -36,7 +37,7 @@ class SectorClusterer(BaseClusterer):
                 - None: Will fetch from Yahoo Finance API
             use_industry: If True, use industry instead of sector (more granular)
         """
-        super().__init__(max_cluster_size, n_bits, linkage_method='ward')
+        super().__init__(max_cluster_size, n_bits, linkage_method='ward', target_cluster_size=target_cluster_size)
 
         # Handle different sector_map input types
         if isinstance(sector_map, (str, Path)):
