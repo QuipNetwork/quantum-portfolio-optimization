@@ -3,7 +3,7 @@
 import time
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union, Tuple
 from dataclasses import dataclass
 
 from clustering import CorrelationClusterer
@@ -11,6 +11,7 @@ from qpo.qubo.formulation import QUBOFormulator
 from qpo.qubo.solver import ParallelQuantumSolver
 from qpo.qubo.decoder import QUBODecoder
 from qpo.qubo.aggregation import ClusterAggregator
+from qpo.qubo.hierarchical import TwoPassHierarchicalOptimizer
 
 
 @dataclass
@@ -51,22 +52,28 @@ class IndependentClustersOptimizer:
                  annealing_time: int = 20,
                  aggregation_strategy: str = 'concatenate',
                  cardinality: Optional[int] = None,
-                 clusterer: Optional[Any] = None):
+                 clusterer: Optional[Any] = None,
+                 use_two_pass: bool = False,
+                 inter_cluster_alpha: Optional[float] = None,
+                 inter_cluster_beta: Optional[float] = None):
         """
         Initialize quantum optimizer.
 
         Args:
             max_cluster_size: Maximum assets per cluster (default 18)
             n_bits: Binary discretization bits (default 10)
-            alpha: Return coefficient (higher = more aggressive)
-            beta: Risk coefficient (higher = more conservative)
+            alpha: Return coefficient for Pass 1 (higher = more aggressive)
+            beta: Risk coefficient for Pass 1 (higher = more conservative)
             lambda_budget: Budget constraint penalty (default 10.0)
             solver_type: 'simulated', 'qpu', or 'hybrid'
             num_reads: Number of QPU samples (default 1000)
             annealing_time: Annealing time in microseconds (default 20)
-            aggregation_strategy: 'concatenate', 'proportional', or 'uniform'
+            aggregation_strategy: 'concatenate', 'proportional', or 'uniform' (ignored if use_two_pass=True)
             cardinality: Maximum non-zero assets (optional)
             clusterer: Custom clusterer instance (default: CorrelationClusterer)
+            use_two_pass: Enable two-pass hierarchical optimization (default False)
+            inter_cluster_alpha: Return coefficient for Pass 2 (default: same as alpha)
+            inter_cluster_beta: Risk coefficient for Pass 2 (default: same as beta)
         """
         self.max_cluster_size = max_cluster_size
         self.n_bits = n_bits
@@ -78,6 +85,11 @@ class IndependentClustersOptimizer:
         self.annealing_time = annealing_time
         self.aggregation_strategy = aggregation_strategy
         self.cardinality = cardinality
+        self.use_two_pass = use_two_pass
+
+        # Two-pass parameters
+        self.inter_cluster_alpha = inter_cluster_alpha if inter_cluster_alpha is not None else alpha
+        self.inter_cluster_beta = inter_cluster_beta if inter_cluster_beta is not None else beta
 
         # Initialize components
         self.clusterer = clusterer or CorrelationClusterer(max_cluster_size=max_cluster_size)
@@ -86,24 +98,41 @@ class IndependentClustersOptimizer:
         self.decoder = QUBODecoder(n_bits)
         self.aggregator = ClusterAggregator(aggregation_strategy)
 
-    def optimize(self, returns: pd.DataFrame) -> QuantumOptimizationResult:
+        # Initialize two-pass optimizer if enabled
+        if use_two_pass:
+            intra_params = {'n_bits': n_bits, 'alpha': alpha, 'beta': beta, 'lambda_budget': lambda_budget}
+            inter_params = {'n_bits': n_bits, 'alpha': self.inter_cluster_alpha, 'beta': self.inter_cluster_beta, 'lambda_budget': lambda_budget}
+            self.hierarchical_optimizer = TwoPassHierarchicalOptimizer(intra_params, inter_params)
+        else:
+            self.hierarchical_optimizer = None
+
+    def optimize(self, returns: pd.DataFrame, return_dict: bool = False) -> Union[QuantumOptimizationResult, Dict[str, Any]]:
         """
         Optimize portfolio using quantum annealing.
 
         Args:
             returns: Daily returns DataFrame (days × assets)
+            return_dict: If True, return dict format (Backtester compatible).
+                        If False, return QuantumOptimizationResult dataclass.
 
         Returns:
-            QuantumOptimizationResult with portfolio weights and metrics
+            QuantumOptimizationResult or dict with keys: weights, metrics, runtime
         """
         start_time = time.time()
+        clustering_time = 0.0
+        solver_time = 0.0
 
         try:
-            # Stage 1: Clustering
+            # Stage 1: Clustering (track time separately)
+            clustering_start = time.time()
             clusters = self._cluster_assets(returns)
+            clustering_time = time.time() - clustering_start
 
             # Stage 2: QUBO Formulation
             mu, Sigma = self._compute_statistics(returns)
+
+            # Start solver timing (excludes clustering)
+            solver_start = time.time()
             bqms = self._formulate_qubos(clusters, mu, Sigma)
 
             # Stage 3: Quantum Solve
@@ -113,22 +142,70 @@ class IndependentClustersOptimizer:
             failed = {cid: res for cid, res in solutions.items() if 'error' in res}
             if failed:
                 error_msg = f"Solver failed for {len(failed)}/{len(clusters)} clusters"
+                if return_dict:
+                    return {
+                        'weights': pd.Series(dtype=float),
+                        'metrics': {
+                            'sharpe_ratio': 0.0,
+                            'expected_return': 0.0,
+                            'volatility': 0.0,
+                            'solver_only_runtime': time.time() - solver_start,
+                            'error': error_msg
+                        },
+                        'runtime': time.time() - start_time
+                    }
                 return self._create_error_result(error_msg, time.time() - start_time)
 
             # Stage 4: Decode Solutions
             cluster_weights = self._decode_solutions(solutions, clusters)
 
             # Stage 5: Aggregate to Global Portfolio
-            global_weights = self._aggregate_clusters(cluster_weights, clusters)
+            if self.use_two_pass:
+                # Two-pass hierarchical optimization
+                global_weights, pass2_metadata = self._aggregate_clusters_two_pass(
+                    cluster_weights, clusters, mu, Sigma
+                )
+            else:
+                # Original single-pass aggregation
+                global_weights = self._aggregate_clusters(cluster_weights, clusters)
+                pass2_metadata = None
+
+            solver_time = time.time() - solver_start
 
             # Calculate metrics
             metrics = self._calculate_metrics(global_weights, mu, Sigma)
 
-            # Prepare result
+            # Total runtime
+            runtime = time.time() - start_time
+
+            # Return dict format for Backtester
+            if return_dict:
+                return {
+                    'weights': global_weights,
+                    'metrics': {
+                        'sharpe_ratio': metrics['sharpe_ratio'],
+                        'expected_return': metrics['expected_return'],
+                        'volatility': metrics['volatility'],
+                        'solver_only_runtime': solver_time,
+                        'clustering_time': clustering_time,
+                        'n_clusters': len(clusters),
+                        'solver_type': self.solver_type
+                    },
+                    'runtime': runtime
+                }
+
+            # Return dataclass format
             cluster_stats = self._get_cluster_statistics(clusters, cluster_weights)
             solver_info = self._extract_solver_info(solutions)
+            solver_info['solver_only_runtime'] = solver_time
+            solver_info['clustering_time'] = clustering_time
 
-            runtime = time.time() - start_time
+            # Add two-pass metadata if applicable
+            if pass2_metadata is not None:
+                solver_info['pass2_metadata'] = pass2_metadata
+                solver_info['optimization_mode'] = 'two_pass_hierarchical'
+            else:
+                solver_info['optimization_mode'] = 'single_pass'
 
             return QuantumOptimizationResult(
                 weights=global_weights,
@@ -145,6 +222,13 @@ class IndependentClustersOptimizer:
 
         except Exception as e:
             runtime = time.time() - start_time
+            if return_dict:
+                return {
+                    'weights': pd.Series(dtype=float),
+                    'metrics': {'sharpe_ratio': 0.0, 'expected_return': 0.0, 'volatility': 0.0},
+                    'runtime': runtime,
+                    'error': str(e)
+                }
             return self._create_error_result(str(e), runtime)
 
     def _cluster_assets(self, returns: pd.DataFrame) -> Dict[str, List[str]]:
@@ -195,12 +279,40 @@ class IndependentClustersOptimizer:
     def _aggregate_clusters(self,
                            cluster_weights: Dict[str, pd.Series],
                            clusters: Dict[str, List[str]]) -> pd.Series:
-        """Aggregate cluster solutions to global portfolio."""
+        """Aggregate cluster solutions to global portfolio (single-pass)."""
         return self.aggregator.aggregate(
             cluster_weights,
             clusters,
             target_budget=1.0,
             cardinality=self.cardinality
+        )
+
+    def _aggregate_clusters_two_pass(self,
+                                     cluster_weights: Dict[str, pd.Series],
+                                     clusters: Dict[str, List[str]],
+                                     mu: pd.Series,
+                                     Sigma: pd.DataFrame) -> Tuple[pd.Series, Dict[str, Any]]:
+        """
+        Aggregate cluster solutions using two-pass hierarchical optimization.
+
+        Pass 2: Formulates and solves a cluster-level QUBO to determine
+        optimal allocation across clusters, considering inter-cluster correlations.
+
+        Args:
+            cluster_weights: Pass 1 results {cluster_id: asset_weights}
+            clusters: {cluster_id: [tickers]}
+            mu: Global expected returns
+            Sigma: Global covariance matrix
+
+        Returns:
+            (global_weights, pass2_metadata)
+        """
+        return self.hierarchical_optimizer.optimize_hierarchically(
+            cluster_weights,
+            clusters,
+            mu,
+            Sigma,
+            self.solver
         )
 
     def _calculate_metrics(self,
@@ -279,5 +391,37 @@ class IndependentClustersOptimizer:
             'annealing_time': self.annealing_time,
             'aggregation_strategy': self.aggregation_strategy,
             'cardinality': self.cardinality,
-            'clusterer_type': type(self.clusterer).__name__
+            'clusterer_type': type(self.clusterer).__name__,
+            'use_two_pass': self.use_two_pass,
+            'inter_cluster_alpha': self.inter_cluster_alpha if self.use_two_pass else None,
+            'inter_cluster_beta': self.inter_cluster_beta if self.use_two_pass else None
         }
+
+
+class QuantumOptimizerWrapper:
+    """
+    Wrapper for IndependentClustersOptimizer to work with Backtester.
+
+    Automatically sets return_dict=True and tracks solver-only runtime.
+    """
+
+    def __init__(self, optimizer: IndependentClustersOptimizer):
+        """
+        Initialize wrapper.
+
+        Args:
+            optimizer: IndependentClustersOptimizer instance
+        """
+        self.optimizer = optimizer
+
+    def optimize(self, returns: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Optimize portfolio and return dict format for Backtester.
+
+        Args:
+            returns: Returns DataFrame
+
+        Returns:
+            Dict with keys: weights, metrics, runtime
+        """
+        return self.optimizer.optimize(returns, return_dict=True)

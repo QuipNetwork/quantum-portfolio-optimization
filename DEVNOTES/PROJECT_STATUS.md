@@ -165,6 +165,37 @@ portfolio-optimization/
    - Updated `BaseClusterer._cut_dendrogram()` with penalty-based optimization
    - Significantly reduces number of small clusters (e.g., DTW: 91→controllable)
 
+5. **Quantum Benchmarking Framework** (October 20, 2025)
+   - **Modified quantum optimizer** for Backtester compatibility:
+     - Added `return_dict` parameter to `optimize()` method
+     - Returns dict format: `{weights, metrics, runtime, solver_only_runtime}`
+     - Created `QuantumOptimizerWrapper` class for automatic format conversion
+   - **Preprocessing time tracking**:
+     - Separate timing for clustering vs solver execution
+     - `solver_only_runtime` excludes clustering preprocessing
+     - Enables fair comparison: QPU vs classical methods
+   - **Comprehensive visualization suite** ([tools/visualizations.py](../tools/visualizations.py)):
+     - Portfolio value comparison (multi-line plot)
+     - Runtime comparison (bar chart with speedup annotations)
+     - Weight allocation heatmaps (stacked area charts)
+     - Risk-return scatter plot (with Sharpe ratio contours)
+     - Performance metrics table (CSV export)
+   - **Quantum vs Classical comparison tool** ([tools/quantum_classical_comparison.py](../tools/quantum_classical_comparison.py)):
+     - Configurable solver types: simulated, QPU, hybrid
+     - Supports all classical optimizers (Risk Parity, Equal-Weight, etc.)
+     - Rolling window backtesting with customizable parameters
+     - Automatic visualization generation
+   - **CLI wrapper script** ([tools/run_quantum_benchmark.py](../tools/run_quantum_benchmark.py)):
+     - Simple command-line interface
+     - Default parameters optimized for typical use
+     - Progress indicators and summary output
+   - **Comprehensive documentation** ([docs/QUANTUM_BENCHMARK_GUIDE.md](../docs/QUANTUM_BENCHMARK_GUIDE.md)):
+     - Quick start examples
+     - Command-line options reference
+     - Performance interpretation guide
+     - Troubleshooting section
+     - Advanced usage patterns
+
 ## Performance Benchmarks
 
 ### Backtest Results (32 assets, 1-year training, monthly rebalancing)
@@ -394,14 +425,21 @@ python tools/clustering_comparison.py \
 1. ✅ ~~Fix numerical stability in Factor clustering~~ (DONE)
 2. ✅ ~~Add Sector clustering to comparison tool~~ (DONE)
 3. ✅ ~~Implement target cluster size control~~ (DONE)
-4. **TODO**: Fix DTW/Graph clustering to respect `--target-cluster-size`
-5. **TODO**: Run quantum vs classical benchmark on real portfolio data
+4. ✅ ~~**Quantum benchmarking framework implemented**~~ (DONE - October 20, 2025)
+   - Modified quantum optimizer to support Backtester format
+   - Added preprocessing time tracking (clustering vs solver)
+   - Created comprehensive visualization suite (5 plot types)
+   - Built quantum vs classical comparison tool
+   - Documented usage in [QUANTUM_BENCHMARK_GUIDE.md](../docs/QUANTUM_BENCHMARK_GUIDE.md)
+5. **TODO**: Fix DTW/Graph clustering to respect `--target-cluster-size`
+6. **IN PROGRESS**: Run quantum vs classical benchmark on real portfolio data
 
 ### Short-term (This Month)
-1. Implement `qpo optimize-quantum` CLI command
-2. Add visualization plots (portfolio value, weights, risk-return)
-3. Document quantum optimizer usage with examples
-4. Create Jupyter notebook tutorial
+1. ✅ ~~Add visualization plots (portfolio value, weights, risk-return)~~ (DONE)
+2. ✅ ~~Document quantum optimizer usage with examples~~ (DONE)
+3. **TODO**: Implement `qpo optimize-quantum` CLI command
+4. **TODO**: Create Jupyter notebook tutorial
+5. **TODO**: Run comprehensive benchmarks with different clustering algorithms
 
 ### Long-term (Next Quarter)
 1. Implement Clustered Averaging quantum approach

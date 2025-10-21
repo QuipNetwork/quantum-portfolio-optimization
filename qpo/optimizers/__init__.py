@@ -4,7 +4,7 @@ from .classical import ClassicalOptimizer
 from .equal_weight import EqualWeightOptimizer
 from .risk_parity import RiskParityOptimizer
 from .regularized import L1RegularizedOptimizer, L2RegularizedOptimizer
-from .quantum import IndependentClustersOptimizer, QuantumOptimizationResult
+from .quantum import IndependentClustersOptimizer, QuantumOptimizationResult, QuantumOptimizerWrapper
 
 __all__ = [
     'ClassicalOptimizer',
@@ -14,4 +14,5 @@ __all__ = [
     'L2RegularizedOptimizer',
     'IndependentClustersOptimizer',
     'QuantumOptimizationResult',
+    'QuantumOptimizerWrapper',
 ]

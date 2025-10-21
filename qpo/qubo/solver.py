@@ -182,6 +182,19 @@ class ParallelQuantumSolver:
         result['cluster_id'] = cluster_id
         return result
 
+    def solve_single_bqm(self, bqm: dimod.BinaryQuadraticModel, label: str = 'QUBO') -> Dict[str, Any]:
+        """
+        Solve a single BQM (used for cluster-level optimization in Pass 2).
+
+        Args:
+            bqm: Binary quadratic model
+            label: Problem label
+
+        Returns:
+            Result dictionary
+        """
+        return self.solver.solve(bqm, label=label)
+
     def solve_all_clusters(self,
                           bqms: Dict[str, dimod.BinaryQuadraticModel]) -> Dict[str, Dict[str, Any]]:
         """

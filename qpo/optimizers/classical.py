@@ -28,7 +28,12 @@ def solve_markowitz_continuous(mu: np.ndarray,
     N = len(mu)
     w = cp.Variable(N)
 
+    # Ensure matrix is a numpy array and exactly symmetric for CVXPY
+    Sigma = np.asarray(Sigma, dtype=np.float64)
+    Sigma = (Sigma + Sigma.T) / 2.0
+
     # Objective: risk - return trade-off
+    # Note: quad_form requires symmetric matrix, but we've ensured that above
     risk = cp.quad_form(w, Sigma)
     ret = mu @ w
     objective = cp.Minimize(gamma * risk - ret)
@@ -174,9 +179,19 @@ class ClassicalOptimizer:
         """
         start_time = time.time()
 
-        # Compute statistics
+        # Compute statistics with regularization for numerical stability
         mu = returns.mean().values * 252  # Annualized
         Sigma = returns.cov().values * 252  # Annualized
+
+        # Handle NaN values that can occur with missing or constant data
+        mu = np.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
+        Sigma = np.nan_to_num(Sigma, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Force exact symmetry (eliminate floating-point errors)
+        Sigma = (Sigma + Sigma.T) / 2
+
+        # Add small diagonal term to prevent ill-conditioning
+        Sigma = Sigma + np.eye(len(Sigma)) * 1e-5
 
         # Solve based on method
         if self.method == 'cvxpy':
@@ -223,11 +238,20 @@ class ClassicalOptimizer:
         # Expected return
         exp_return = mu @ w_arr
 
-        # Expected risk (volatility)
-        exp_risk = np.sqrt(w_arr @ Sigma @ w_arr)
+        # Expected risk (volatility) with numerical stability checks
+        # Clip Sigma to prevent overflow before matmul
+        Sigma_safe = np.clip(Sigma, -1e8, 1e8)
+
+        # Suppress warnings for numerical edge cases
+        with np.errstate(all='ignore'):
+            risk_squared = w_arr @ Sigma_safe @ w_arr
+
+        # Post-process result with safety checks
+        risk_squared = np.clip(risk_squared, 0, 1e10)  # Prevent overflow
+        exp_risk = np.sqrt(risk_squared) if np.isfinite(risk_squared) else 0.0
 
         # Sharpe ratio (assuming risk-free rate = 0)
-        sharpe = exp_return / exp_risk if exp_risk > 0 else 0
+        sharpe = exp_return / exp_risk if exp_risk > 1e-10 else 0.0
 
         # Number of assets with non-zero weights
         n_assets = int(np.sum(w_arr > 1e-6))
