@@ -35,7 +35,7 @@ from qpo.optimizers.risk_parity import RiskParityOptimizer
 from qpo.optimizers.regularized import L1RegularizedOptimizer, L2RegularizedOptimizer
 from qpo.optimizers.backtest import Backtester
 from clustering import (
-    CorrelationClusterer, GraphClusterer, SectorClusterer,
+    CorrelationClusterer, AntiCorrelationClusterer, GraphClusterer, SectorClusterer,
     CovarianceClusterer, ReturnsClusterer, VolatilityClusterer,
     DTWClusterer, FactorClusterer
 )
@@ -104,6 +104,8 @@ def create_optimizers(
 
         if method == 'correlation':
             return CorrelationClusterer(**common_args)
+        elif method == 'anti_correlation':
+            return AntiCorrelationClusterer(**common_args)
         elif method == 'graph':
             return GraphClusterer(**common_args)
         elif method == 'sector':
@@ -131,15 +133,10 @@ def create_optimizers(
 
                     quantum_opt = IndependentClustersOptimizer(
                         max_cluster_size=max_cluster_size,
-                        n_bits=10,
-                        alpha=1.0,  # Return coefficient
-                        beta=1.0,   # Risk coefficient
-                        lambda_budget=10.0,
                         solver_type=solver_type,
-                        num_reads=1000,
-                        annealing_time=20,
-                        aggregation_strategy='proportional',
                         clusterer=clusterer
+                        # Use default parameters optimized for MV baseline matching:
+                        # alpha=1.5, beta=0.8, lambda_budget=5.0, num_reads=2000, use_two_pass=True
                     )
 
                     # Wrap for Backtester compatibility
@@ -290,15 +287,15 @@ def main():
                        help='Exclude classical optimizers')
     parser.add_argument('--output-dir', type=str, default='output/quantum_benchmark',
                        help='Output directory for plots and results')
-    parser.add_argument('--max-cluster-size', type=int, default=18,
-                       help='Maximum cluster size for quantum optimizer')
+    parser.add_argument('--max-cluster-size', type=int, default=24,
+                       help='Maximum cluster size for quantum optimizer (tuned for MV baseline matching)')
     parser.add_argument('--target-cluster-size', type=int, default=10,
                        help='Target average cluster size')
     parser.add_argument('--initial-capital', type=float, default=100000.0,
                        help='Initial portfolio capital (default: 100000)')
     parser.add_argument('--clustering-methods', nargs='+',
                        default=['all'],
-                       choices=['all', 'correlation', 'graph', 'sector', 'covariance',
+                       choices=['all', 'correlation', 'anti_correlation', 'graph', 'sector', 'covariance',
                                'returns', 'volatility', 'dtw', 'factor'],
                        help='Clustering methods to test for quantum optimizer (default: all). Use "all" to run all methods.')
     parser.add_argument('--optimizers', nargs='+',
@@ -309,7 +306,7 @@ def main():
     args = parser.parse_args()
 
     # Handle "all" clustering methods
-    all_clustering_methods = ['correlation', 'graph', 'sector', 'covariance',
+    all_clustering_methods = ['correlation', 'anti_correlation', 'graph', 'sector', 'covariance',
                               'returns', 'volatility', 'dtw', 'factor']
     if 'all' in args.clustering_methods:
         clustering_methods = all_clustering_methods

@@ -345,15 +345,21 @@ class TwoPassHierarchicalOptimizer:
 
         Args:
             intra_cluster_params: Parameters for Pass 1 (asset-level QUBO)
-                - n_bits, alpha, beta, lambda_budget
+                - n_bits, alpha, beta, lambda_budget, num_reads (optional)
             inter_cluster_params: Parameters for Pass 2 (cluster-level QUBO)
-                - n_bits, alpha, beta, lambda_budget
+                - n_bits, alpha, beta, lambda_budget, num_reads (optional)
         """
         self.intra_params = intra_cluster_params
         self.inter_params = inter_cluster_params
 
+        # Extract num_reads for each pass (defaults if not specified)
+        self.intra_num_reads = intra_cluster_params.get('num_reads', 128)
+        self.inter_num_reads = inter_cluster_params.get('num_reads', 256)
+
         self.stats_calculator = ClusterStatisticsCalculator()
-        self.cluster_formulator = ClusterLevelQUBOFormulator(**inter_cluster_params)
+        # Pass params without num_reads (ClusterLevelQUBOFormulator doesn't need it)
+        formulator_params = {k: v for k, v in inter_cluster_params.items() if k != 'num_reads'}
+        self.cluster_formulator = ClusterLevelQUBOFormulator(**formulator_params)
 
     def compute_final_weights(
         self,
@@ -455,7 +461,17 @@ class TwoPassHierarchicalOptimizer:
         )
 
         # Step 3: Solve cluster allocation QUBO
-        cluster_solution = solver.solve_single_bqm(cluster_bqm)
+        # Use configurable num_reads for Pass 2 (from inter_cluster_params)
+        # Typically K=6-8 clusters (60-80 vars) vs N=20-24 assets (200-240 vars)
+        # Pass 2 is single critical optimization → typically needs 2x Pass 1 reads
+        from qpo.qubo.solver import QuantumSolver
+        pass2_num_reads = self.inter_num_reads  # Configurable from inter_params
+        pass2_solver = QuantumSolver(
+            solver_type=solver.solver.solver_type,
+            num_reads=pass2_num_reads,
+            annealing_time=solver.solver.annealing_time
+        )
+        cluster_solution = pass2_solver.solve(cluster_bqm, label='Pass2-ClusterAllocation')
 
         if 'error' in cluster_solution:
             raise ValueError(f"Cluster allocation solve failed: {cluster_solution['error']}")

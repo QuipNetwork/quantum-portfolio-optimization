@@ -23,7 +23,7 @@ import pandas as pd
 from typing import Dict, Any, Optional, List, Union, Tuple
 from dataclasses import dataclass
 
-from clustering import CorrelationClusterer
+from clustering import CorrelationClusterer, VolatilityClusterer
 from qpo.qubo.formulation import QUBOFormulator
 from qpo.qubo.solver import ParallelQuantumSolver
 from qpo.qubo.decoder import QUBODecoder
@@ -59,38 +59,42 @@ class IndependentClustersOptimizer:
     """
 
     def __init__(self,
-                 max_cluster_size: int = 18,
+                 max_cluster_size: int = 24,
                  n_bits: int = 10,
-                 alpha: float = 1.0,
-                 beta: float = 1.0,
-                 lambda_budget: float = 10.0,
+                 alpha: float = 1.5,
+                 beta: float = 0.8,
+                 lambda_budget: float = 5.0,
                  solver_type: str = 'simulated',
-                 num_reads: int = 1000,
+                 num_reads: int = 2000,
+                 intra_cluster_num_reads: Optional[int] = None,
                  annealing_time: int = 20,
-                 aggregation_strategy: str = 'concatenate',
+                 aggregation_strategy: str = 'proportional',
                  cardinality: Optional[int] = None,
                  clusterer: Optional[Any] = None,
-                 use_two_pass: bool = False,
+                 use_two_pass: bool = True,
                  inter_cluster_alpha: Optional[float] = None,
-                 inter_cluster_beta: Optional[float] = None):
+                 inter_cluster_beta: Optional[float] = None,
+                 inter_cluster_num_reads: Optional[int] = None):
         """
         Initialize quantum optimizer.
 
         Args:
-            max_cluster_size: Maximum assets per cluster (default 18)
+            max_cluster_size: Maximum assets per cluster (default 24, tuned for MV baseline matching)
             n_bits: Binary discretization bits (default 10)
-            alpha: Return coefficient for Pass 1 (higher = more aggressive)
-            beta: Risk coefficient for Pass 1 (higher = more conservative)
-            lambda_budget: Budget constraint penalty (default 10.0)
+            alpha: Return coefficient for Pass 1 (default 1.5, tuned for MV baseline matching)
+            beta: Risk coefficient for Pass 1 (default 0.8, tuned for MV baseline matching)
+            lambda_budget: Budget constraint penalty (default 5.0, reduced to lessen dominance)
             solver_type: 'simulated', 'qpu', or 'hybrid'
-            num_reads: Number of QPU samples (default 1000)
+            num_reads: Number of QPU samples (default 2000, DEPRECATED - use intra_cluster_num_reads)
+            intra_cluster_num_reads: Number of QPU samples for Pass 1 intra-cluster optimization (default: None, uses num_reads or 128)
             annealing_time: Annealing time in microseconds (default 20)
-            aggregation_strategy: 'concatenate', 'proportional', or 'uniform' (ignored if use_two_pass=True)
+            aggregation_strategy: 'proportional', 'concatenate', or 'uniform' (ignored if use_two_pass=True)
             cardinality: Maximum non-zero assets (optional)
-            clusterer: Custom clusterer instance (default: CorrelationClusterer)
-            use_two_pass: Enable two-pass hierarchical optimization (default False)
-            inter_cluster_alpha: Return coefficient for Pass 2 (default: same as alpha)
-            inter_cluster_beta: Risk coefficient for Pass 2 (default: same as beta)
+            clusterer: Custom clusterer instance (default: VolatilityClusterer, best performer in benchmarks)
+            use_two_pass: Enable two-pass hierarchical optimization (default True, addresses inter-cluster covariances)
+            inter_cluster_alpha: Return coefficient for Pass 2 (default: alpha * 1.15, more aggressive)
+            inter_cluster_beta: Risk coefficient for Pass 2 (default: beta * 0.85, less risk-averse)
+            inter_cluster_num_reads: Number of QPU samples for Pass 2 inter-cluster optimization (default: max(256, intra*2))
         """
         self.max_cluster_size = max_cluster_size
         self.n_bits = n_bits
@@ -98,27 +102,55 @@ class IndependentClustersOptimizer:
         self.beta = beta
         self.lambda_budget = lambda_budget
         self.solver_type = solver_type
-        self.num_reads = num_reads
+        self.num_reads = num_reads  # Backward compatibility
         self.annealing_time = annealing_time
         self.aggregation_strategy = aggregation_strategy
         self.cardinality = cardinality
         self.use_two_pass = use_two_pass
 
-        # Two-pass parameters
-        self.inter_cluster_alpha = inter_cluster_alpha if inter_cluster_alpha is not None else alpha
-        self.inter_cluster_beta = inter_cluster_beta if inter_cluster_beta is not None else beta
+        # Intra-cluster num_reads (Pass 1): Default 128 based on diminishing returns analysis
+        # If not specified, check if legacy num_reads was provided, otherwise default to 128
+        if intra_cluster_num_reads is not None:
+            self.intra_cluster_num_reads = intra_cluster_num_reads
+        elif num_reads != 2000:  # User explicitly set num_reads (not default)
+            self.intra_cluster_num_reads = num_reads
+        else:  # Use optimized default
+            self.intra_cluster_num_reads = 128
+
+        # Two-pass parameters (more aggressive for inter-cluster to recover diversification)
+        # Default: inter_alpha slightly higher than alpha, inter_beta slightly lower than beta
+        self.inter_cluster_alpha = inter_cluster_alpha if inter_cluster_alpha is not None else min(2.0, alpha * 1.15)
+        self.inter_cluster_beta = inter_cluster_beta if inter_cluster_beta is not None else max(0.5, beta * 0.85)
+
+        # Inter-cluster num_reads (Pass 2): Default 2x intra, minimum 256
+        # Pass 2 is single critical optimization → needs higher quality than parallelized Pass 1
+        self.inter_cluster_num_reads = inter_cluster_num_reads if inter_cluster_num_reads is not None else max(256, self.intra_cluster_num_reads * 2)
 
         # Initialize components
-        self.clusterer = clusterer or CorrelationClusterer(max_cluster_size=max_cluster_size)
+        # Use VolatilityClusterer by default (best Sharpe 1.364 in benchmarks)
+        # Mixes high/low-vol assets within clusters for better intra-cluster diversification
+        self.clusterer = clusterer or VolatilityClusterer(max_cluster_size=max_cluster_size)
         self.formulator = QUBOFormulator(n_bits, alpha, beta, lambda_budget)
-        self.solver = ParallelQuantumSolver(solver_type, num_reads, annealing_time)
+        self.solver = ParallelQuantumSolver(solver_type, self.intra_cluster_num_reads, annealing_time)
         self.decoder = QUBODecoder(n_bits)
         self.aggregator = ClusterAggregator(aggregation_strategy)
 
         # Initialize two-pass optimizer if enabled
         if use_two_pass:
-            intra_params = {'n_bits': n_bits, 'alpha': alpha, 'beta': beta, 'lambda_budget': lambda_budget}
-            inter_params = {'n_bits': n_bits, 'alpha': self.inter_cluster_alpha, 'beta': self.inter_cluster_beta, 'lambda_budget': lambda_budget}
+            intra_params = {
+                'n_bits': n_bits,
+                'alpha': alpha,
+                'beta': beta,
+                'lambda_budget': lambda_budget,
+                'num_reads': self.intra_cluster_num_reads
+            }
+            inter_params = {
+                'n_bits': n_bits,
+                'alpha': self.inter_cluster_alpha,
+                'beta': self.inter_cluster_beta,
+                'lambda_budget': lambda_budget,
+                'num_reads': self.inter_cluster_num_reads
+            }
             self.hierarchical_optimizer = TwoPassHierarchicalOptimizer(intra_params, inter_params)
         else:
             self.hierarchical_optimizer = None
