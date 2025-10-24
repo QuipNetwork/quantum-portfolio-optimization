@@ -44,7 +44,6 @@ env/
 # Data files
 data/
 *.csv
-*.json
 !configs/*.json
 
 # Reports and outputs

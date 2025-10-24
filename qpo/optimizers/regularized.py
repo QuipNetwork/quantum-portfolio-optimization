@@ -32,6 +32,7 @@ from typing import Dict, Any
 
 from qpo.utils.constants import TRADING_DAYS_PER_YEAR
 from qpo.utils.matrix_ops import sanitize_covariance_matrix
+from qpo.utils.portfolio_metrics import compute_portfolio_metrics
 
 
 class L1RegularizedOptimizer:
@@ -82,7 +83,7 @@ class L1RegularizedOptimizer:
 
         # Package results
         weights_series = pd.Series(weights, index=returns.columns)
-        metrics = self._compute_metrics(weights_series, mu, Sigma)
+        metrics = compute_portfolio_metrics(weights_series, mu, Sigma, include_extra=True)
 
         return {
             'weights': weights_series,
@@ -120,44 +121,6 @@ class L1RegularizedOptimizer:
             raise ValueError(f"L1 optimization failed: {problem.status}")
 
         return w.value
-
-    def _compute_metrics(self,
-                        w: pd.Series,
-                        mu: np.ndarray,
-                        Sigma: np.ndarray) -> Dict[str, float]:
-        """Compute portfolio performance metrics."""
-        w_arr = w.values
-        N = len(w_arr)
-
-        exp_return = mu @ w_arr
-
-        # Compute risk with numerical stability checks
-        # Clip Sigma to prevent overflow before matmul
-        Sigma_safe = np.clip(Sigma, -1e8, 1e8)
-
-        # Suppress warnings for numerical edge cases
-        with np.errstate(all='ignore'):
-            risk_squared = w_arr @ Sigma_safe @ w_arr
-
-        # Post-process result with safety checks
-        risk_squared = np.clip(risk_squared, 0, 1e10)  # Prevent overflow
-        exp_risk = np.sqrt(risk_squared) if np.isfinite(risk_squared) else 0.0
-
-        sharpe = exp_return / exp_risk if exp_risk > 1e-10 else 0.0
-        n_assets = int(np.sum(w_arr > 1e-6))
-
-        herfindahl = np.sum(w_arr ** 2)
-        effective_n = 1 / herfindahl if herfindahl > 0 else N
-
-        return {
-            'expected_return': float(exp_return),
-            'expected_risk': float(exp_risk),
-            'sharpe_ratio': float(sharpe),
-            'n_assets': n_assets,
-            'herfindahl_index': float(herfindahl),
-            'effective_n_assets': float(effective_n),
-            'sparsity': 1 - (n_assets / N)
-        }
 
 
 class L2RegularizedOptimizer:
@@ -208,7 +171,7 @@ class L2RegularizedOptimizer:
 
         # Package results
         weights_series = pd.Series(weights, index=returns.columns)
-        metrics = self._compute_metrics(weights_series, mu, Sigma)
+        metrics = compute_portfolio_metrics(weights_series, mu, Sigma, include_extra=True)
 
         return {
             'weights': weights_series,
@@ -246,44 +209,3 @@ class L2RegularizedOptimizer:
             raise ValueError(f"L2 optimization failed: {problem.status}")
 
         return w.value
-
-    def _compute_metrics(self,
-                        w: pd.Series,
-                        mu: np.ndarray,
-                        Sigma: np.ndarray) -> Dict[str, float]:
-        """Compute portfolio performance metrics."""
-        w_arr = w.values
-        N = len(w_arr)
-
-        exp_return = mu @ w_arr
-
-        # Compute risk with numerical stability checks
-        # Clip Sigma to prevent overflow before matmul
-        Sigma_safe = np.clip(Sigma, -1e8, 1e8)
-
-        # Suppress warnings for numerical edge cases
-        with np.errstate(all='ignore'):
-            risk_squared = w_arr @ Sigma_safe @ w_arr
-
-        # Post-process result with safety checks
-        risk_squared = np.clip(risk_squared, 0, 1e10)  # Prevent overflow
-        exp_risk = np.sqrt(risk_squared) if np.isfinite(risk_squared) else 0.0
-
-        sharpe = exp_return / exp_risk if exp_risk > 1e-10 else 0.0
-        n_assets = int(np.sum(w_arr > 1e-6))
-
-        herfindahl = np.sum(w_arr ** 2)
-        effective_n = 1 / herfindahl if herfindahl > 0 else N
-
-        # Weight uniformity
-        weight_std = np.std(w_arr)
-
-        return {
-            'expected_return': float(exp_return),
-            'expected_risk': float(exp_risk),
-            'sharpe_ratio': float(sharpe),
-            'n_assets': n_assets,
-            'herfindahl_index': float(herfindahl),
-            'effective_n_assets': float(effective_n),
-            'weight_std': float(weight_std)
-        }

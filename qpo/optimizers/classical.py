@@ -26,6 +26,7 @@ from typing import Dict, Any, Optional
 
 from qpo.utils.constants import TRADING_DAYS_PER_YEAR
 from qpo.utils.matrix_ops import sanitize_covariance_matrix
+from qpo.utils.portfolio_metrics import compute_portfolio_metrics
 
 
 def solve_markowitz_continuous(mu: np.ndarray,
@@ -223,7 +224,7 @@ class ClassicalOptimizer:
         weights_series = pd.Series(weights, index=returns.columns)
 
         # Compute metrics
-        metrics = self._compute_metrics(weights_series, mu, Sigma)
+        metrics = compute_portfolio_metrics(weights_series, mu, Sigma)
 
         return {
             'weights': weights_series,
@@ -231,53 +232,3 @@ class ClassicalOptimizer:
             'runtime': runtime
         }
 
-    def _compute_metrics(self,
-                        w: pd.Series,
-                        mu: np.ndarray,
-                        Sigma: np.ndarray) -> Dict[str, float]:
-        """
-        Compute portfolio performance metrics.
-
-        Args:
-            w: Portfolio weights (pd.Series)
-            mu: Expected returns (annualized)
-            Sigma: Covariance matrix (annualized)
-
-        Returns:
-            Dictionary of metrics
-        """
-        w_arr = w.values
-
-        # Expected return
-        exp_return = mu @ w_arr
-
-        # Expected risk (volatility) with numerical stability checks
-        # Clip Sigma to prevent overflow before matmul
-        Sigma_safe = np.clip(Sigma, -1e8, 1e8)
-
-        # Suppress warnings for numerical edge cases
-        with np.errstate(all='ignore'):
-            risk_squared = w_arr @ Sigma_safe @ w_arr
-
-        # Post-process result with safety checks
-        risk_squared = np.clip(risk_squared, 0, 1e10)  # Prevent overflow
-        exp_risk = np.sqrt(risk_squared) if np.isfinite(risk_squared) else 0.0
-
-        # Sharpe ratio (assuming risk-free rate = 0)
-        sharpe = exp_return / exp_risk if exp_risk > 1e-10 else 0.0
-
-        # Number of assets with non-zero weights
-        n_assets = int(np.sum(w_arr > 1e-6))
-
-        # Effective number of assets (1 / Herfindahl index)
-        herfindahl = np.sum(w_arr ** 2)
-        effective_n = 1 / herfindahl if herfindahl > 0 else 0
-
-        return {
-            'expected_return': float(exp_return),
-            'expected_risk': float(exp_risk),
-            'sharpe_ratio': float(sharpe),
-            'n_assets': n_assets,
-            'herfindahl_index': float(herfindahl),
-            'effective_n_assets': float(effective_n)
-        }
