@@ -22,6 +22,7 @@ import pandas as pd
 from typing import Dict, List, Optional, Union
 from pathlib import Path
 from .base import BaseClusterer
+from .sector_merge import smart_sector_merge, get_sector_cluster_stats
 
 
 class SectorClusterer(BaseClusterer):
@@ -108,6 +109,46 @@ class SectorClusterer(BaseClusterer):
 
             sector_clusters[sector].append(ticker)
 
+        # Calculate how many clusters we'll have after splitting
+        def count_clusters_after_split(clusters, max_size):
+            """Count total clusters after splitting large ones."""
+            total = 0
+            for tickers in clusters.values():
+                if len(tickers) <= max_size:
+                    total += 1
+                else:
+                    total += int(np.ceil(len(tickers) / max_size))
+            return total
+
+        # Apply smart sector merging if needed (before splitting)
+        if self.max_clusters is not None:
+            # Check if we'll exceed max_clusters after splitting
+            clusters_after_split = count_clusters_after_split(sector_clusters, self.max_cluster_size)
+
+            if clusters_after_split > self.max_clusters:
+                # Need to merge sectors to reduce cluster count
+                # Calculate target: how many sectors we need before splitting
+                # This is approximate - we merge until splitting yields <= max_clusters
+                target_sectors = max(1, self.max_clusters // 2)  # Start conservative
+
+                # Iteratively merge until we satisfy constraints
+                merged = sector_clusters
+                for target in range(target_sectors, 0, -1):
+                    try:
+                        merged = smart_sector_merge(
+                            sector_clusters,
+                            target,
+                            float('inf')  # No size limit during merging
+                        )
+
+                        # Check if this works after splitting
+                        if count_clusters_after_split(merged, self.max_cluster_size) <= self.max_clusters:
+                            sector_clusters = merged
+                            break
+                    except ValueError:
+                        # Merging failed, try next target
+                        continue
+
         # Split large sectors if they exceed max_cluster_size
         final_clusters = {}
         cluster_counter = 1
@@ -128,12 +169,16 @@ class SectorClusterer(BaseClusterer):
                     cluster_id = f"{sector}_{i+1}"
                     final_clusters[cluster_id] = tickers_in_sector[start_idx:end_idx]
 
-        # Enforce max_clusters constraint
+        # Final validation
         if self.max_clusters is not None and len(final_clusters) > self.max_clusters:
+            stats = get_sector_cluster_stats(sector_clusters)
             raise ValueError(
-                f"Cannot satisfy max_clusters constraint: Portfolio has {len(sector_clusters)} sectors "
-                f"which split into {len(final_clusters)} clusters, but max_clusters={self.max_clusters}. "
-                f"Sector clustering created: {dict(sorted([(s, len(t)) for s, t in sector_clusters.items()], key=lambda x: -x[1]))}"
+                f"Cannot satisfy topology constraints for sector clustering:\n"
+                f"  Portfolio has {stats['num_sectors']} sectors (after merging)\n"
+                f"  Total assets: {stats['total_assets']}\n"
+                f"  Sector sizes: {stats['min_size']}-{stats['max_size']} (avg {stats['avg_size']:.1f})\n"
+                f"  After splitting: {len(final_clusters)} clusters\n"
+                f"  Required: max {self.max_clusters} clusters, {self.max_cluster_size} assets/cluster"
             )
 
         return final_clusters
