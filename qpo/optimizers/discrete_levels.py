@@ -20,11 +20,19 @@
 import time
 import numpy as np
 import pandas as pd
-from typing import Optional, Any
+from typing import Optional, Any, Dict, List, Tuple
 import dimod
 
 from qpo.qubo.discrete_levels import DiscreteLevelFormulator, CachedEmbeddingManager
 from qpo.qubo.aggregation import ClusterAggregator
+from qpo.utils.constants import (
+    TRADING_DAYS_PER_YEAR,
+    DEFAULT_N_LEVELS,
+    DEFAULT_ALPHA,
+    DEFAULT_BETA,
+    DEFAULT_THERMOMETER_PENALTY,
+    DEFAULT_MAX_CLUSTER_SIZE
+)
 from clustering import SectorClusterer
 
 
@@ -37,14 +45,14 @@ class DiscreteLevelsOptimizer:
     """
 
     def __init__(self,
-                 n_levels: int = 6,  # Match available templates (most are 6 levels)
-                 alpha: float = 10,
-                 beta: float = 2,
-                 thermometer_penalty: float = 10.0,
+                 n_levels: int = DEFAULT_N_LEVELS,
+                 alpha: float = DEFAULT_ALPHA,
+                 beta: float = DEFAULT_BETA,
+                 thermometer_penalty: float = DEFAULT_THERMOMETER_PENALTY,
                  solver_type: str = 'simulated',
                  num_reads: Optional[int] = None,
                  num_sweeps: Optional[int] = None,
-                 max_cluster_size: int = 19,
+                 max_cluster_size: int = DEFAULT_MAX_CLUSTER_SIZE,
                  portfolio_info_csv: str = "portfolio-info.csv",
                  clusterer: Optional[Any] = None,
                  expected_assets_per_cluster: Optional[int] = None,
@@ -481,15 +489,15 @@ class DiscreteLevelsOptimizer:
         annualized_returns = pd.Series(index=weights.index, dtype=float)
         for ticker in weights.index:
             if ticker in returns.columns:
-                # Annualized return for single asset: daily_mean * 252
-                annualized_returns[ticker] = returns[ticker].mean() * 252
+                # Annualized return for single asset: daily_mean * TRADING_DAYS_PER_YEAR
+                annualized_returns[ticker] = returns[ticker].mean() * TRADING_DAYS_PER_YEAR
             elif ticker in tickers:
                 # For clusters: average returns across cluster members
                 cluster_tickers = tickers
                 valid_tickers = [t for t in cluster_tickers if t in returns.columns]
                 if len(valid_tickers) > 0:
                     annualized_returns[ticker] = (
-                        returns[valid_tickers].mean(axis=1).mean() * 252
+                        returns[valid_tickers].mean(axis=1).mean() * TRADING_DAYS_PER_YEAR
                     )
                 else:
                     annualized_returns[ticker] = 0.0
@@ -597,7 +605,7 @@ class DiscreteLevelsOptimizer:
             Adjusted beta for meta-cluster
         """
         # Compute market return over training period (annualized)
-        market_return = returns.mean().mean() * 252
+        market_return = returns.mean().mean() * TRADING_DAYS_PER_YEAR
 
         # Base beta
         base_beta = self.beta
@@ -631,8 +639,8 @@ class DiscreteLevelsOptimizer:
             Dictionary with 'weights' and 'metrics'
         """
         # Compute mu and Sigma from returns (preprocessing, not timed)
-        mu_original = returns.mean() * 252  # Annualized returns
-        Sigma_original = returns.cov() * 252  # Annualized covariance
+        mu_original = returns.mean() * TRADING_DAYS_PER_YEAR  # Annualized returns
+        Sigma_original = returns.cov() * TRADING_DAYS_PER_YEAR  # Annualized covariance
 
         # Cluster assets (preprocessing, not timed)
         tickers = list(mu_original.index)
