@@ -39,6 +39,7 @@ from qpo.optimizers.equal_weight import EqualWeightOptimizer
 from qpo.optimizers.risk_parity import RiskParityOptimizer
 from qpo.optimizers.regularized import L1RegularizedOptimizer, L2RegularizedOptimizer
 from qpo.optimizers.backtest import Backtester
+from qpo.utils.data_prep import load_portfolio_data as load_portfolio_data_util
 from clustering import (
     CorrelationClusterer, AntiCorrelationClusterer, GraphClusterer, SectorClusterer,
     CovarianceClusterer, ReturnsClusterer, VolatilityClusterer,
@@ -51,6 +52,9 @@ def load_portfolio_data(csv_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Load portfolio price data and compute returns.
 
+    This is a wrapper around qpo.utils.data_prep.load_portfolio_data
+    that adds progress logging.
+
     Args:
         csv_path: Path to CSV file with price data
 
@@ -58,8 +62,9 @@ def load_portfolio_data(csv_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         (prices, returns) DataFrames
     """
     print(f"Loading portfolio data from: {csv_path}")
-    prices = pd.read_csv(csv_path, index_col=0, parse_dates=True)
-    returns = prices.pct_change().dropna()
+
+    # Use centralized utility (ensures consistent price->returns conversion)
+    prices, returns = load_portfolio_data_util(csv_path, preprocess=False)
 
     print(f"  Data: {len(prices)} days, {len(prices.columns)} assets")
     print(f"  Date range: {prices.index[0]} to {prices.index[-1]}")

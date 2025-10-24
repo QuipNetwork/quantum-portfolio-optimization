@@ -38,10 +38,10 @@ class DiscreteLevelsOptimizer:
 
     def __init__(self,
                  n_levels: int = 6,  # Match available templates (most are 6 levels)
-                 alpha: float = 1.5,
-                 beta: float = .5,
+                 alpha: float = 10,
+                 beta: float = 2,
                  budget_penalty: float = 0.0,  
-                 thermometer_penalty: float = 5.0, 
+                 thermometer_penalty: float = 10.0, 
                  solver_type: str = 'simulated',
                  num_reads: Optional[int] = None,
                  num_sweeps: Optional[int] = None,
@@ -350,6 +350,84 @@ class DiscreteLevelsOptimizer:
 
         return cluster_ids, cluster_mu, cluster_Sigma, cluster_tickers_map
 
+    def _apply_meta_cluster_weights(self, cluster_results: dict, meta_cluster_weights: pd.Series, real_tickers: set) -> pd.Series:
+        """
+        Apply meta-cluster weights to scale asset weights with magnitude preservation.
+
+        Option B: Preserve the magnitude of meta-cluster weights while normalizing.
+
+        Instead of flattening all clusters to equal proportions (sum=1.0), we:
+        1. Compute normalized weights (sum=1.0)
+        2. Scale by original magnitude (n_clusters)
+        3. Top clusters get multiplier > 1.0, receiving more than proportional share
+
+        This amplifies the solver's preference signal while maintaining valid weights.
+
+        Args:
+            cluster_results: Dict of cluster_id -> {'weights': pd.Series, 'tickers': list}
+            meta_cluster_weights: Unnormalized meta-cluster weights from solver
+            real_tickers: Set of real asset tickers (excludes dummy padding assets)
+
+        Returns:
+            Final portfolio weights (pd.Series, normalized to sum=1.0)
+        """
+        # Magnitude preservation: normalize, then rescale by n_clusters
+        # This allows top cluster to receive > 1/n_clusters share
+        n_clusters = len(meta_cluster_weights)
+        original_sum = meta_cluster_weights.sum()
+
+        if original_sum > 0:
+            # Normalize to sum=1.0, then scale by n_clusters to preserve magnitude
+            cluster_allocations = (meta_cluster_weights / original_sum) * n_clusters
+        else:
+            # Fallback to equal weight across clusters
+            cluster_allocations = pd.Series(
+                1.0,  # Each cluster gets weight=1.0 (will normalize at portfolio level)
+                index=meta_cluster_weights.index
+            )
+
+        # Convert to dict for lookup
+        cluster_allocations_dict = cluster_allocations.to_dict()
+
+        # Apply meta-cluster weights to asset weights
+        all_weights = {}
+        for cluster_id, result in cluster_results.items():
+            cluster_alloc = cluster_allocations_dict[cluster_id]
+            cluster_weights_unnorm = result['weights']  # pd.Series
+            cluster_weight_sum = cluster_weights_unnorm.sum()
+
+            if cluster_weight_sum > 0:
+                # Scale asset weights by cluster allocation from meta-cluster
+                cluster_weights_norm = cluster_weights_unnorm / cluster_weight_sum
+                for ticker in cluster_weights_norm.index:
+                    all_weights[ticker] = cluster_weights_unnorm[ticker] * cluster_alloc
+            else:
+                # Equal weight within cluster, scaled by cluster allocation
+                n_tickers = len(result['tickers'])
+                for ticker in result['tickers']:
+                    all_weights[ticker] = cluster_alloc / n_tickers
+
+        # Filter out dummy assets (used for template padding)
+        real_weights = {k: v for k, v in all_weights.items() if k in real_tickers}
+
+        # Normalize to sum = 1.0 (should already be close, but ensure exact)
+        total_weight = sum(real_weights.values())
+        if total_weight > 0:
+            final_weights = pd.Series(
+                {k: v/total_weight for k, v in real_weights.items()}
+            )
+        else:
+            # Fallback to equal weight (only over real assets)
+            original_tickers = list(real_tickers)
+            final_weights = pd.Series(1.0 / len(original_tickers), index=original_tickers)
+
+        # Ensure all real tickers are present
+        for ticker in real_tickers:
+            if ticker not in final_weights:
+                final_weights[ticker] = 0.0
+
+        return final_weights
+
     def optimize(self, returns: pd.DataFrame) -> dict:
         """
         Optimize portfolio weights.
@@ -519,6 +597,11 @@ class DiscreteLevelsOptimizer:
                         'tickers': cluster_tickers
                     }
 
+            # Apply meta-cluster weights to get final portfolio weights
+            final_weights = self._apply_meta_cluster_weights(
+                cluster_results, meta_cluster_weights, real_tickers
+            )
+
         elif self.solver_type == 'simulated':
             # For SA: Combine all asset clusters + meta-cluster into one BQM and solve together
 
@@ -577,49 +660,10 @@ class DiscreteLevelsOptimizer:
                         'tickers': cluster_tickers
                     }
 
-        # CLASSICAL APPLICATION OF META-CLUSTER WEIGHTS
-        # Meta-cluster weights were solved simultaneously with asset clusters above
-        # Now apply meta-cluster weights to scale asset weights
-
-        # Convert meta-cluster weights to dict for lookup
-        cluster_allocations = meta_cluster_weights.to_dict()
-
-        # Apply meta-cluster weights to asset weights
-        all_weights = {}
-        for cluster_id, result in cluster_results.items():
-            cluster_alloc = cluster_allocations[cluster_id]
-            cluster_weights_unnorm = result['weights']  # pd.Series
-            cluster_weight_sum = cluster_weights_unnorm.sum()
-
-            if cluster_weight_sum > 0:
-                # Scale asset weights by cluster allocation from meta-cluster
-                cluster_weights_norm = cluster_weights_unnorm / cluster_weight_sum
-                for ticker in cluster_weights_norm.index:
-                    all_weights[ticker] = cluster_weights_norm[ticker] * cluster_alloc
-            else:
-                # Equal weight within cluster, scaled by cluster allocation
-                n_tickers = len(result['tickers'])
-                for ticker in result['tickers']:
-                    all_weights[ticker] = cluster_alloc / n_tickers
-
-        # Filter out dummy assets (used for template padding)
-        real_weights = {k: v for k, v in all_weights.items() if k in real_tickers}
-
-        # Normalize to sum = 1.0 (should already be close, but ensure exact)
-        total_weight = sum(real_weights.values())
-        if total_weight > 0:
-            final_weights = pd.Series(
-                {k: v/total_weight for k, v in real_weights.items()}
+            # Apply meta-cluster weights to get final portfolio weights
+            final_weights = self._apply_meta_cluster_weights(
+                cluster_results, meta_cluster_weights, real_tickers
             )
-        else:
-            # Fallback to equal weight (only over real assets)
-            original_tickers = list(real_tickers)
-            final_weights = pd.Series(1.0 / len(original_tickers), index=original_tickers)
-
-        # Ensure all real tickers are present
-        for ticker in real_tickers:
-            if ticker not in final_weights:
-                final_weights[ticker] = 0.0
 
         # Compute metrics using original mu/Sigma (before padding)
         # Align weights with original data

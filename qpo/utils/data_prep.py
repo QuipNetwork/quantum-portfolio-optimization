@@ -20,6 +20,57 @@
 import pandas as pd
 import numpy as np
 from typing import Optional, Tuple
+from pathlib import Path
+
+
+def load_portfolio_data(csv_path: str,
+                       return_method: str = 'simple',
+                       preprocess: bool = True,
+                       max_missing_pct: float = 0.05,
+                       max_ffill_days: int = 3) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load portfolio price data and convert to returns.
+
+    This is the recommended way to load portfolio data for optimization.
+    It ensures consistent handling of the price -> returns conversion.
+
+    Args:
+        csv_path: Path to portfolio CSV file (expected to contain PRICES, not returns)
+        return_method: 'simple' (pct_change) or 'log' (log returns). Default: 'simple'
+        preprocess: Whether to clean/validate data. Default: True
+        max_missing_pct: Maximum allowed missing data per ticker (if preprocess=True)
+        max_ffill_days: Maximum days to forward-fill gaps (if preprocess=True)
+
+    Returns:
+        Tuple of (prices_df, returns_df)
+            - prices_df: Raw price data (dates × tickers)
+            - returns_df: Computed returns (dates × tickers)
+
+    Example:
+        >>> prices, returns = load_portfolio_data('portfolio.csv')
+        >>> # Use returns for optimization
+        >>> result = optimizer.optimize(returns)
+
+    Note:
+        The CSV file should contain daily price data with:
+        - First column: Date (will be used as index)
+        - Remaining columns: Asset prices (column names = tickers)
+    """
+    # Load price data
+    prices = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+
+    # Optionally clean data
+    if preprocess:
+        prices = preprocess_portfolio(
+            prices,
+            max_missing_pct=max_missing_pct,
+            max_ffill_days=max_ffill_days
+        )
+
+    # Convert to returns
+    returns = compute_returns(prices, method=return_method)
+
+    return prices, returns
 
 
 def preprocess_portfolio(df: pd.DataFrame,
