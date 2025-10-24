@@ -46,7 +46,9 @@ class CovarianceClusterer(BaseClusterer):
                  linkage_method: str = 'ward',
                  distance_metric: str = 'euclidean',
                  normalize: bool = False,
-                 target_cluster_size: int = None):
+                 target_cluster_size: int = None,
+                 max_clusters: int = None,
+                 min_cluster_size: int = None):
         """
         Initialize covariance clusterer.
 
@@ -57,7 +59,9 @@ class CovarianceClusterer(BaseClusterer):
             distance_metric: 'euclidean', 'frobenius', or 'spectral'
             normalize: If True, normalize distances to [0, 1] range
         """
-        super().__init__(max_cluster_size, n_bits, linkage_method, target_cluster_size=target_cluster_size)
+        super().__init__(max_cluster_size, n_bits, linkage_method, target_cluster_size=target_cluster_size,
+                        max_clusters=max_clusters,
+                        min_cluster_size=min_cluster_size)
         self.distance_metric = distance_metric
         self.normalize = normalize
 

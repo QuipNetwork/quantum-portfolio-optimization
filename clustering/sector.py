@@ -41,7 +41,9 @@ class SectorClusterer(BaseClusterer):
                  n_bits: int = 10,
                  sector_map: Optional[Union[Dict[str, str], str, Path]] = None,
                  use_industry: bool = False,
-                 target_cluster_size: int = None):
+                 target_cluster_size: int = None,
+                 max_clusters: int = None,
+                 min_cluster_size: int = None):
         """
         Initialize sector-based clusterer.
 
@@ -54,7 +56,9 @@ class SectorClusterer(BaseClusterer):
                 - None: Will fetch from Yahoo Finance API
             use_industry: If True, use industry instead of sector (more granular)
         """
-        super().__init__(max_cluster_size, n_bits, linkage_method='ward', target_cluster_size=target_cluster_size)
+        super().__init__(max_cluster_size, n_bits, linkage_method='ward', target_cluster_size=target_cluster_size,
+                        max_clusters=max_clusters,
+                        min_cluster_size=min_cluster_size)
 
         # Handle different sector_map input types
         if isinstance(sector_map, (str, Path)):
@@ -123,6 +127,14 @@ class SectorClusterer(BaseClusterer):
 
                     cluster_id = f"{sector}_{i+1}"
                     final_clusters[cluster_id] = tickers_in_sector[start_idx:end_idx]
+
+        # Enforce max_clusters constraint
+        if self.max_clusters is not None and len(final_clusters) > self.max_clusters:
+            raise ValueError(
+                f"Cannot satisfy max_clusters constraint: Portfolio has {len(sector_clusters)} sectors "
+                f"which split into {len(final_clusters)} clusters, but max_clusters={self.max_clusters}. "
+                f"Sector clustering created: {dict(sorted([(s, len(t)) for s, t in sector_clusters.items()], key=lambda x: -x[1]))}"
+            )
 
         return final_clusters
 

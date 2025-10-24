@@ -29,6 +29,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from qpo.optimizers.quantum import IndependentClustersOptimizer, QuantumOptimizerWrapper
+from qpo.optimizers.discrete_levels import DiscreteLevelsOptimizer
 from qpo.optimizers.classical import ClassicalOptimizer
 from qpo.optimizers.equal_weight import EqualWeightOptimizer
 from qpo.optimizers.risk_parity import RiskParityOptimizer
@@ -37,7 +38,7 @@ from qpo.optimizers.backtest import Backtester
 from clustering import (
     CorrelationClusterer, AntiCorrelationClusterer, GraphClusterer, SectorClusterer,
     CovarianceClusterer, ReturnsClusterer, VolatilityClusterer,
-    DTWClusterer, FactorClusterer
+    DTWClusterer, FactorClusterer, UniformClusterer
 )
 from tools.visualizations import generate_all_visualizations
 
@@ -62,14 +63,141 @@ def load_portfolio_data(csv_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     return prices, returns
 
 
+def find_qpu_template_params(returns: pd.DataFrame, n_levels: int = 10) -> Dict[str, Any]:
+    """
+    Auto-detect optimal QPU parameters based on available templates.
+
+    Tests different max_cluster_size values to find one that produces
+    a cluster count matching an available template.
+
+    Args:
+        returns: Returns DataFrame
+        n_levels: Number of discrete levels (default 10)
+
+    Returns:
+        Dict with template_name, max_cluster_size, n_clusters, or None if no match
+    """
+    import json
+    template_dir = Path(__file__).parent.parent / 'embeddings' / 'templates'
+    n_assets = len(returns.columns)
+
+    # Find templates matching n_levels
+    templates = list(template_dir.glob(f'portfolio_*c_*a_{n_levels}l*.json'))
+    if not templates:
+        print(f"  ⚠ No templates found for n_levels={n_levels}")
+        return None
+
+    # Parse template specs
+    template_specs = []
+    for tpath in templates:
+        try:
+            with open(tpath, 'r') as f:
+                data = json.load(f)
+            config = data.get('configuration', {})
+            n_clusters_total = config.get('n_clusters_total', 0)
+            assets_per = config.get('assets_per_cluster', 0)
+            n_asset_clusters = n_clusters_total - 1  # Subtract meta-cluster
+
+            template_specs.append({
+                'name': tpath.name,
+                'n_asset_clusters': n_asset_clusters,
+                'assets_per_cluster': assets_per,
+                'total': n_clusters_total
+            })
+        except Exception:
+            continue
+
+    if not template_specs:
+        return None
+
+    # Test max_cluster_size values to find template match
+    # IMPORTANT: Templates are designed for UniformClusterer (equal-sized clusters)
+    # Not compatible with variable-sized clustering like CorrelationClusterer
+    print(f"  Auto-detecting template for {n_assets} assets...")
+
+    # Try to match each template by configuring UniformClusterer appropriately
+    # Strategy: Use templates that are >= our portfolio size (pad with dummy assets)
+    viable_templates = []
+
+    for spec in template_specs:
+        target_n_asset_clusters = spec['n_asset_clusters']
+        expected_assets_per = spec['assets_per_cluster']
+        template_total_assets = target_n_asset_clusters * expected_assets_per
+
+        # Template must be >= our portfolio size (we'll pad if larger)
+        if template_total_assets >= n_assets:
+            viable_templates.append({
+                'spec': spec,
+                'total_assets': template_total_assets,
+                'padding_needed': template_total_assets - n_assets
+            })
+
+    # Sort by least padding needed (prefer exact match)
+    viable_templates.sort(key=lambda x: x['padding_needed'])
+
+    for tmpl in viable_templates:
+        spec = tmpl['spec']
+        target_n_asset_clusters = spec['n_asset_clusters']
+        expected_assets_per = spec['assets_per_cluster']
+        padding_needed = tmpl['padding_needed']
+
+        # Calculate clustering parameters
+        # Distribute real assets evenly, will pad to reach expected size
+        target_cluster_size = int(n_assets / target_n_asset_clusters) + 1
+        max_cluster_size = expected_assets_per  # Use exact template size
+
+        try:
+            clusterer = UniformClusterer(
+                max_cluster_size=max_cluster_size,
+                target_cluster_size=target_cluster_size
+            )
+            clusters = clusterer.cluster(returns)
+            n_clusters = len(clusters)
+
+            # Check if we got the right number of clusters
+            if n_clusters == target_n_asset_clusters:
+                cluster_sizes = [len(tickers) for tickers in clusters.values()]
+                min_size = min(cluster_sizes)
+                max_size_actual = max(cluster_sizes)
+
+                # Allow template to be larger (will pad with dummy assets)
+                if max_size_actual <= expected_assets_per:
+                    if padding_needed > 0:
+                        print(f"  ✓ Found match: {spec['name']} (with {padding_needed} dummy assets)")
+                    else:
+                        print(f"  ✓ Found match: {spec['name']} (exact fit)")
+                    print(f"    {n_clusters} clusters, sizes {min_size}-{max_size_actual}, template expects {expected_assets_per}")
+
+                    return {
+                        'template_name': spec['name'],
+                        'max_cluster_size': max_cluster_size,
+                        'target_cluster_size': target_cluster_size,
+                        'n_clusters': n_clusters,
+                        'n_levels': n_levels,
+                        'expected_assets_per_cluster': expected_assets_per,
+                        'expected_n_clusters': target_n_asset_clusters,
+                        'padding_needed': padding_needed,
+                        'use_uniform_clustering': True
+                    }
+        except ValueError:
+            # This configuration doesn't work, try next template
+            continue
+
+    print(f"  ⚠ No template matches portfolio size")
+    return None
+
+
 def create_optimizers(
     solver_types: List[str] = ['simulated'],
     clustering_methods: List[str] = ['correlation'],
     include_classical: bool = True,
     max_cluster_size: int = 18,
     target_cluster_size: int = 10,
+    max_clusters: int = None,
+    min_cluster_size: int = 2,
     portfolio_info_csv: str = None,
-    optimizer_filter: List[str] = None
+    optimizer_filter: List[str] = None,
+    returns: pd.DataFrame = None
 ) -> Dict[str, Any]:
     """
     Create all optimizer instances for comparison.
@@ -99,13 +227,17 @@ def create_optimizers(
         """Create clusterer instance based on method name."""
         common_args = {
             'max_cluster_size': max_cluster_size,
-            'target_cluster_size': target_cluster_size
+            'target_cluster_size': target_cluster_size,
+            'max_clusters': max_clusters,
+            'min_cluster_size': min_cluster_size
         }
 
         if method == 'correlation':
             return CorrelationClusterer(**common_args)
         elif method == 'anti_correlation':
             return AntiCorrelationClusterer(**common_args)
+        elif method == 'uniform':
+            return UniformClusterer(**common_args)
         elif method == 'graph':
             return GraphClusterer(**common_args)
         elif method == 'sector':
@@ -126,11 +258,14 @@ def create_optimizers(
     # Quantum optimizers (different solver types × clustering methods)
     if should_include('quantum'):
         print("\nConfiguring Quantum Optimizers...")
+
         for solver_type in solver_types:
             for clustering_method in clustering_methods:
                 try:
                     clusterer = create_clusterer(clustering_method)
 
+                    # Use IndependentClustersOptimizer for all solver types
+                    # QPU will use LazyFixedEmbedding or FixedEmbedding cache (no pre-computed templates required)
                     quantum_opt = IndependentClustersOptimizer(
                         max_cluster_size=max_cluster_size,
                         solver_type=solver_type,
@@ -138,11 +273,9 @@ def create_optimizers(
                         # Use default parameters optimized for MV baseline matching:
                         # alpha=1.5, beta=0.8, lambda_budget=5.0, num_reads=2000, use_two_pass=True
                     )
-
-                    # Wrap for Backtester compatibility
                     wrapped = QuantumOptimizerWrapper(quantum_opt)
-
                     name = f"Quantum ({solver_type.upper()}, {clustering_method.capitalize()})"
+
                     optimizers[name] = wrapped
                     print(f"  ✓ {name}")
                 except Exception as e:
@@ -235,12 +368,24 @@ def run_comparison(
             # Add solver-specific metrics if available
             if len(result['weights_history']) > 0:
                 solver_runtimes = []
+                qpu_times = []
+                network_times = []
+
                 for w in result['weights_history']:
-                    if 'solver_only_runtime' in w.get('metrics', {}):
-                        solver_runtimes.append(w['metrics']['solver_only_runtime'])
+                    metrics = w.get('metrics', {})
+                    if 'solver_only_runtime' in metrics:
+                        solver_runtimes.append(metrics['solver_only_runtime'])
+                    if 'qpu_access_time' in metrics:
+                        qpu_times.append(metrics['qpu_access_time'])
+                    if 'network_latency' in metrics:
+                        network_times.append(metrics['network_latency'])
 
                 if solver_runtimes:
                     result['metrics']['avg_solver_only_runtime'] = np.mean(solver_runtimes)
+                if qpu_times:
+                    result['metrics']['avg_qpu_access_time'] = np.mean(qpu_times)
+                if network_times:
+                    result['metrics']['avg_network_latency'] = np.mean(network_times)
 
             results[name] = result
 
@@ -293,9 +438,13 @@ def main():
                        help='Target average cluster size')
     parser.add_argument('--initial-capital', type=float, default=100000.0,
                        help='Initial portfolio capital (default: 100000)')
+    parser.add_argument('--max-clusters', type=int, default=None,
+                       help='Maximum number of clusters (hard constraint for fixed template)')
+    parser.add_argument('--min-cluster-size', type=int, default=2,
+                       help='Minimum assets per cluster (default: 2, avoids single-asset clusters)')
     parser.add_argument('--clustering-methods', nargs='+',
                        default=['all'],
-                       choices=['all', 'correlation', 'anti_correlation', 'graph', 'sector', 'covariance',
+                       choices=['all', 'correlation', 'anti_correlation', 'uniform', 'graph', 'sector', 'covariance',
                                'returns', 'volatility', 'dtw', 'factor'],
                        help='Clustering methods to test for quantum optimizer (default: all). Use "all" to run all methods.')
     parser.add_argument('--optimizers', nargs='+',
@@ -306,7 +455,7 @@ def main():
     args = parser.parse_args()
 
     # Handle "all" clustering methods
-    all_clustering_methods = ['correlation', 'anti_correlation', 'graph', 'sector', 'covariance',
+    all_clustering_methods = ['correlation', 'anti_correlation', 'uniform', 'graph', 'sector', 'covariance',
                               'returns', 'volatility', 'dtw', 'factor']
     if 'all' in args.clustering_methods:
         clustering_methods = all_clustering_methods
@@ -328,8 +477,11 @@ def main():
         include_classical=not args.no_classical,
         max_cluster_size=args.max_cluster_size,
         target_cluster_size=args.target_cluster_size,
+        max_clusters=args.max_clusters,
+        min_cluster_size=args.min_cluster_size,
         portfolio_info_csv=args.portfolio_info_csv,
-        optimizer_filter=args.optimizers
+        optimizer_filter=args.optimizers,
+        returns=returns  # Pass returns for QPU template auto-detection
     )
 
     # Run comparison

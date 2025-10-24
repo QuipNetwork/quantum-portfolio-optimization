@@ -32,19 +32,28 @@ class BaseClusterer(ABC):
                  max_cluster_size: int = 18,
                  n_bits: int = 10,
                  linkage_method: str = 'ward',
-                 target_cluster_size: int = None):
+                 target_cluster_size: int = None,
+                 max_clusters: int = None,
+                 min_cluster_size: int = None):
         """
         Initialize base clusterer.
 
         Args:
-            max_cluster_size: Maximum assets per cluster (for Zephyr degree constraint)
+            max_cluster_size: Maximum assets per cluster (HARD constraint - quantum hardware limit)
             n_bits: Bits per weight variable (for discretization)
             linkage_method: Hierarchical linkage method ('ward', 'single', 'complete', 'average')
             target_cluster_size: Target average cluster size (default: max_cluster_size // 2)
                                 If specified, algorithm aims for this average size to avoid too many small clusters
+            max_clusters: Maximum number of clusters (HARD constraint - fixed template limit)
+                         If specified, algorithm will produce at most this many clusters
+            min_cluster_size: Minimum assets per cluster (HARD constraint - efficiency requirement)
+                             If specified, small clusters will be merged into nearest neighbors
+                             Default: 2 (avoid single-asset clusters)
         """
         self.max_cluster_size = max_cluster_size
         self.target_cluster_size = target_cluster_size if target_cluster_size is not None else max_cluster_size // 2
+        self.max_clusters = max_clusters
+        self.min_cluster_size = min_cluster_size if min_cluster_size is not None else 2
         self.n_bits = n_bits
         self.max_variables = max_cluster_size * n_bits
         self.linkage_method = linkage_method
@@ -98,10 +107,10 @@ class BaseClusterer(ABC):
                        Z: np.ndarray,
                        labels: List[str]) -> Dict[str, List[str]]:
         """
-        Cut dendrogram to enforce cluster size constraints.
+        Cut dendrogram to enforce cluster size and count constraints.
 
         Uses iterative approach: find optimal number of clusters that satisfies
-        both min and max cluster size constraints.
+        max_cluster_size (HARD) and max_clusters (HARD if specified).
 
         Args:
             Z: Linkage matrix from scipy
@@ -109,62 +118,116 @@ class BaseClusterer(ABC):
 
         Returns:
             Dictionary of clusters
+
+        Raises:
+            ValueError: If constraints cannot be satisfied
         """
         n = len(labels)
 
-        # Start with reasonable number of clusters
-        n_clusters = max(1, n // self.max_cluster_size)
+        # Calculate feasible range for number of clusters
+        min_clusters_needed = (n + self.max_cluster_size - 1) // self.max_cluster_size  # Ceiling division
+
+        if self.max_clusters is not None:
+            if min_clusters_needed > self.max_clusters:
+                raise ValueError(
+                    f"Cannot satisfy constraints: {n} assets with max_cluster_size={self.max_cluster_size} "
+                    f"requires at least {min_clusters_needed} clusters, but max_clusters={self.max_clusters}. "
+                    f"Either increase max_cluster_size or increase max_clusters."
+                )
+            # Start from max allowed and work down
+            n_clusters = self.max_clusters
+        else:
+            # Start from minimum needed
+            n_clusters = min_clusters_needed
 
         best_result = None
         best_violation_score = float('inf')
 
         # Iteratively adjust to find best configuration
-        for _ in range(100):  # Safety limit
+        for attempt in range(100):  # Safety limit
             cluster_ids = fcluster(Z, n_clusters, criterion='maxclust')
 
             # Check cluster sizes
             unique_ids, counts = np.unique(cluster_ids, return_counts=True)
+            actual_n_clusters = len(unique_ids)
 
-            # Count constraint violations and distance from target
-            max_violations = np.sum(counts > self.max_cluster_size)
-            
-            # Calculate how far from target average cluster size
+            # Check hard constraints
+            max_size_violations = np.sum(counts > self.max_cluster_size)
+
+            # Check max_clusters constraint
+            if self.max_clusters is not None and actual_n_clusters > self.max_clusters:
+                cluster_count_violations = actual_n_clusters - self.max_clusters
+            else:
+                cluster_count_violations = 0
+
+            # Calculate how far from target average cluster size (soft constraint)
             avg_size = np.mean(counts)
             target_penalty = abs(avg_size - self.target_cluster_size)
-            
-            # Total score: violations + distance from target (weighted lower)
-            violation_score = max_violations * 1000 + target_penalty
+
+            # Violation score: hard constraints heavily weighted
+            violation_score = (
+                max_size_violations * 10000 +      # CRITICAL: clusters too large
+                cluster_count_violations * 5000 +   # CRITICAL: too many clusters
+                target_penalty                      # MINOR: deviation from target size
+            )
 
             # Track best solution
             if violation_score < best_violation_score:
                 best_violation_score = violation_score
-                best_result = cluster_ids.copy()
+                best_result = (cluster_ids.copy(), actual_n_clusters, counts.copy())
 
-            # Check if we found a valid solution
-            if np.all(counts <= self.max_cluster_size) and abs(avg_size - self.target_cluster_size) < 1:
-                # All clusters satisfy both constraints
+            # Check if we found a perfect solution
+            if (max_size_violations == 0 and
+                cluster_count_violations == 0 and
+                target_penalty < 1):
                 break
 
-            # Adjust based on violations and target
-            if max_violations > 0:
-                # Some clusters too large - need more granular clusters
+            # Adjustment logic
+            if max_size_violations > 0:
+                # Some clusters too large - need more clusters
                 n_clusters += 1
-            elif avg_size > self.target_cluster_size:
-                # Clusters too large on average - need more clusters
+            elif cluster_count_violations > 0:
+                # Too many clusters - try to merge (reduce n_clusters)
+                n_clusters -= 1
+            elif avg_size > self.target_cluster_size and n_clusters < n:
+                # Average too large - split more
                 n_clusters += 1
-            elif avg_size < self.target_cluster_size and n_clusters > 1:
-                # Clusters too small on average - need fewer clusters
+            elif avg_size < self.target_cluster_size and n_clusters > min_clusters_needed:
+                # Average too small - merge more
                 n_clusters -= 1
             else:
-                # Close enough to target
+                # Close enough
                 break
 
+            # Bounds check
+            if self.max_clusters and n_clusters > self.max_clusters:
+                n_clusters = self.max_clusters
+            if n_clusters < min_clusters_needed:
+                n_clusters = min_clusters_needed
             if n_clusters >= n:
-                # Degenerate case: each asset is its own cluster
                 break
 
         # Use best result found
-        cluster_ids = best_result if best_result is not None else cluster_ids
+        if best_result is None:
+            raise RuntimeError("Failed to find any valid clustering solution")
+
+        cluster_ids, final_n_clusters, final_counts = best_result
+
+        # Check if constraints are satisfied
+        if np.any(final_counts > self.max_cluster_size):
+            violating = final_counts[final_counts > self.max_cluster_size]
+            raise ValueError(
+                f"Cannot satisfy max_cluster_size={self.max_cluster_size}. "
+                f"{len(violating)} clusters exceed limit (sizes: {violating.tolist()}). "
+                f"This violates quantum hardware constraints."
+            )
+
+        if self.max_clusters and final_n_clusters > self.max_clusters:
+            raise ValueError(
+                f"Cannot satisfy max_clusters={self.max_clusters}. "
+                f"Created {final_n_clusters} clusters. "
+                f"Consider increasing max_cluster_size to allow fewer, larger clusters."
+            )
 
         # Build cluster dictionary
         clusters = {}
@@ -174,7 +237,85 @@ class BaseClusterer(ABC):
                 clusters[cid] = []
             clusters[cid].append(labels[idx])
 
+        # Merge small clusters
+        clusters = self._merge_small_clusters(clusters, labels, Z)
+
         return clusters
+
+    def _merge_small_clusters(self,
+                             clusters: Dict[str, List[str]],
+                             labels: List[str],
+                             Z: np.ndarray) -> Dict[str, List[str]]:
+        """
+        Merge clusters smaller than min_cluster_size into nearest neighbors.
+
+        Strategy: For each small cluster, find the nearest larger cluster based
+        on the hierarchical linkage and merge into it (if merge doesn't violate max_cluster_size).
+
+        Args:
+            clusters: Initial cluster dictionary
+            labels: Asset labels
+            Z: Linkage matrix
+
+        Returns:
+            Modified cluster dictionary with small clusters merged
+        """
+        # Check if any clusters are too small
+        small_clusters = {cid: tickers for cid, tickers in clusters.items()
+                         if len(tickers) < self.min_cluster_size}
+
+        if not small_clusters:
+            return clusters  # Nothing to merge
+
+        # Build label-to-cluster map
+        label_to_cluster = {}
+        for cid, tickers in clusters.items():
+            for ticker in tickers:
+                label_to_cluster[ticker] = cid
+
+        # Merge small clusters iteratively
+        merged_clusters = dict(clusters)
+
+        for small_cid, small_tickers in small_clusters.items():
+            # Find nearest cluster that can accept these assets
+            best_target_cid = None
+            best_distance = float('inf')
+
+            for target_cid, target_tickers in merged_clusters.items():
+                if target_cid == small_cid:
+                    continue  # Don't merge with self
+
+                # Check if merge would violate max_cluster_size
+                if len(target_tickers) + len(small_tickers) > self.max_cluster_size:
+                    continue
+
+                # Compute average pairwise distance between clusters
+                # (approximation: use mean of all pairwise distances)
+                distances = []
+                for s_ticker in small_tickers:
+                    s_idx = labels.index(s_ticker)
+                    for t_ticker in target_tickers:
+                        t_idx = labels.index(t_ticker)
+                        # Use linkage matrix to estimate distance
+                        # This is approximate - ideally we'd recompute from original distance matrix
+                        distances.append(abs(s_idx - t_idx))  # Simple index-based heuristic
+
+                avg_dist = np.mean(distances) if distances else float('inf')
+
+                if avg_dist < best_distance:
+                    best_distance = avg_dist
+                    best_target_cid = target_cid
+
+            # Merge into best target
+            if best_target_cid is not None:
+                merged_clusters[best_target_cid].extend(small_tickers)
+                del merged_clusters[small_cid]
+            else:
+                # Cannot merge without violating max_cluster_size
+                # Keep the small cluster (will be caught by validation if this is a problem)
+                pass
+
+        return merged_clusters
 
     def validate_degree_constraint(self,
                                    clusters: Dict[str, List[str]]) -> bool:

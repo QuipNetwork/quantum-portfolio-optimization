@@ -66,6 +66,9 @@ class EqualWeightOptimizer:
         # Compute metrics
         mu = returns.mean().values * 252
         Sigma = returns.cov().values * 252
+
+        # Sanitize inputs before metrics computation
+        mu, Sigma = self._sanitize_inputs(mu, Sigma)
         metrics = self._compute_metrics(weights_series, mu, Sigma)
 
         return {
@@ -74,17 +77,64 @@ class EqualWeightOptimizer:
             'runtime': runtime
         }
 
+    def _sanitize_inputs(self, mu: np.ndarray, Sigma: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Sanitize mean returns and covariance matrix for numerical stability.
+
+        Args:
+            mu: Mean returns vector
+            Sigma: Covariance matrix
+
+        Returns:
+            (sanitized_mu, sanitized_Sigma)
+        """
+        # Make copies to avoid modifying originals
+        mu = mu.copy()
+        Sigma = Sigma.copy()
+
+        # Replace inf/nan in mu with 0
+        if not np.all(np.isfinite(mu)):
+            mu = np.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Replace inf/nan in Sigma with 0 (diagonal will be fixed below)
+        if not np.all(np.isfinite(Sigma)):
+            Sigma = np.nan_to_num(Sigma, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Ensure covariance matrix is positive semi-definite
+        # If diagonal elements are zero/negative, use small positive value
+        diag = np.diag(Sigma)
+        if np.any(diag <= 0):
+            min_var = 1e-8
+            diag = np.maximum(diag, min_var)
+            np.fill_diagonal(Sigma, diag)
+
+        return mu, Sigma
+
     def _compute_metrics(self,
                         w: pd.Series,
                         mu: np.ndarray,
                         Sigma: np.ndarray) -> Dict[str, float]:
-        """Compute portfolio performance metrics."""
+        """
+        Compute portfolio performance metrics.
+
+        Note: Assumes mu and Sigma have already been sanitized via _sanitize_inputs.
+        """
         w_arr = w.values
         N = len(w_arr)
 
         exp_return = mu @ w_arr
-        exp_risk = np.sqrt(w_arr @ Sigma @ w_arr)
-        sharpe = exp_return / exp_risk if exp_risk > 0 else 0
+
+        # Compute risk with numerical safeguards
+        # Suppress runtime warnings since we handle invalid values explicitly
+        with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+            variance = w_arr @ Sigma @ w_arr
+
+        # Handle negative or invalid variance
+        if not np.isfinite(variance) or variance < 0:
+            variance = 0.0
+        exp_risk = np.sqrt(variance)
+
+        sharpe = exp_return / exp_risk if exp_risk > 0 else 0.0
 
         # All assets have equal weight
         herfindahl = np.sum(w_arr ** 2)

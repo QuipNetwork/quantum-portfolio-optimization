@@ -301,6 +301,13 @@ def generate_metrics_table(backtest_results: Dict[str, Dict[str, Any]],
 
         # Get solver-specific metrics if available
         solver_runtime = metrics.get('avg_solver_only_runtime', metrics['avg_runtime'])
+        qpu_time = metrics.get('avg_qpu_access_time', None)
+        network_time = metrics.get('avg_network_latency', None)
+
+        # Calculate other runtime (total - solver - network if available)
+        other_runtime = metrics['avg_runtime']
+        if qpu_time is not None and network_time is not None:
+            other_runtime = other_runtime - qpu_time - network_time
 
         row = {
             'Optimizer': name,
@@ -311,6 +318,9 @@ def generate_metrics_table(backtest_results: Dict[str, Dict[str, Any]],
             'Max Drawdown (%)': metrics['max_drawdown'] * 100,
             'Win Rate (%)': metrics['win_rate'] * 100,
             'Avg Runtime (s)': metrics['avg_runtime'],
+            'QPU Time (ms)': f"{qpu_time * 1000:.1f}" if qpu_time is not None else '-',
+            'Network (s)': f"{network_time:.3f}" if network_time is not None else '-',
+            'Other (s)': f"{other_runtime:.3f}" if qpu_time is not None else '-',
             'Solver Only (s)': solver_runtime if solver_runtime != metrics['avg_runtime'] else '-',
             'N Rebalances': metrics['n_rebalances'],
             'Final Value ($)': metrics['final_value']

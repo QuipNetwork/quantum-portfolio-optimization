@@ -37,7 +37,9 @@ class DTWClusterer(BaseClusterer):
                  n_bits: int = 10,
                  linkage_method: str = 'average',
                  window_size: int = None,
-                 target_cluster_size: int = None):
+                 target_cluster_size: int = None,
+                 max_clusters: int = None,
+                 min_cluster_size: int = None):
         """
         Initialize DTW clusterer.
 
@@ -47,7 +49,9 @@ class DTWClusterer(BaseClusterer):
             linkage_method: 'ward', 'single', 'complete', or 'average'
             window_size: Sakoe-Chiba band width (None = no constraint)
         """
-        super().__init__(max_cluster_size, n_bits, linkage_method, target_cluster_size=target_cluster_size)
+        super().__init__(max_cluster_size, n_bits, linkage_method, target_cluster_size=target_cluster_size,
+                        max_clusters=max_clusters,
+                        min_cluster_size=min_cluster_size)
         self.window_size = window_size
 
     def compute_distance_matrix(self, returns: pd.DataFrame) -> np.ndarray:

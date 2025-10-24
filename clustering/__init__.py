@@ -33,6 +33,7 @@ from .sector import SectorClusterer
 from .dtw import DTWClusterer
 from .graph import GraphClusterer
 from .factor import FactorClusterer
+from .uniform import UniformClusterer
 
 __all__ = [
     # Default (backward compatible)
@@ -51,4 +52,5 @@ __all__ = [
     'DTWClusterer',
     'GraphClusterer',
     'FactorClusterer',
+    'UniformClusterer',
 ]

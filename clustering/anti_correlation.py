@@ -19,6 +19,7 @@
 
 import numpy as np
 import pandas as pd
+from typing import Dict, List
 from .base import BaseClusterer
 
 
@@ -45,7 +46,9 @@ class AntiCorrelationClusterer(BaseClusterer):
                  max_cluster_size: int = 18,
                  n_bits: int = 10,
                  linkage_method: str = 'ward',
-                 target_cluster_size: int = None):
+                 target_cluster_size: int = None,
+                 max_clusters: int = None,
+                 min_cluster_size: int = None):
         """
         Initialize anti-correlation clusterer.
 
@@ -55,7 +58,9 @@ class AntiCorrelationClusterer(BaseClusterer):
             linkage_method: 'ward', 'single', 'complete', or 'average'
             target_cluster_size: Target average cluster size (default: max_cluster_size // 2)
         """
-        super().__init__(max_cluster_size, n_bits, linkage_method, target_cluster_size=target_cluster_size)
+        super().__init__(max_cluster_size, n_bits, linkage_method, target_cluster_size=target_cluster_size,
+                        max_clusters=max_clusters,
+                        min_cluster_size=min_cluster_size)
 
     def compute_distance_matrix(self, returns: pd.DataFrame) -> np.ndarray:
         """
@@ -91,3 +96,171 @@ class AntiCorrelationClusterer(BaseClusterer):
         distance = np.clip(distance, 0, 2)
 
         return distance
+
+    def cluster(self, returns: pd.DataFrame) -> Dict[str, List[str]]:
+        """
+        Cluster assets using anti-correlation. Tries hierarchical first, then falls back to greedy worst-fit.
+
+        Args:
+            returns: Returns DataFrame (T × N)
+
+        Returns:
+            Dictionary mapping cluster IDs to lists of ticker symbols
+        """
+        # Try hierarchical clustering first
+        try:
+            return super().cluster(returns)
+        except ValueError as e:
+            # If hierarchical fails due to constraints, use greedy worst-fit
+            if "Cannot satisfy" in str(e):
+                return self._greedy_worst_fit_cluster(returns)
+            else:
+                raise
+
+    def _greedy_worst_fit_cluster(self, returns: pd.DataFrame) -> Dict[str, List[str]]:
+        """
+        Greedy worst-fit clustering that maximizes diversification within constraints.
+
+        Strategy:
+        1. Compute pairwise correlations
+        2. For each asset, find the cluster with LOWEST average correlation (most diversified)
+        3. Add to that cluster if it doesn't violate constraints
+        4. Otherwise, start a new cluster
+
+        Args:
+            returns: Returns DataFrame (T × N)
+
+        Returns:
+            Dictionary of clusters
+        """
+        tickers = returns.columns.tolist()
+        n_assets = len(tickers)
+
+        # Compute correlation matrix
+        corr_matrix = returns.corr().values
+
+        # Start with first asset in first cluster
+        clusters = {"cluster_1": [tickers[0]]}
+        cluster_counter = 1
+
+        # Process remaining assets in order of decreasing average correlation
+        # (most correlated assets first - hardest to diversify)
+        avg_correlations = []
+        for i in range(1, n_assets):
+            avg_corr = np.mean(np.abs(corr_matrix[i, :i]))  # Avg with previous assets
+            avg_correlations.append((avg_corr, tickers[i]))
+
+        avg_correlations.sort(reverse=True)  # Highest correlation first (hardest to place)
+
+        for _, ticker in avg_correlations:
+            ticker_idx = tickers.index(ticker)
+
+            # Find WORST-fit cluster for this asset (LOWEST average correlation = most diversified)
+            best_cluster_id = None
+            best_avg_corr = np.inf  # Want MINIMUM correlation
+
+            for cluster_id, cluster_tickers in clusters.items():
+                # Check if adding would violate max_cluster_size
+                if len(cluster_tickers) >= self.max_cluster_size:
+                    continue
+
+                # Compute average correlation with cluster members
+                cluster_indices = [tickers.index(t) for t in cluster_tickers]
+                avg_corr = np.mean([corr_matrix[ticker_idx, idx] for idx in cluster_indices])
+
+                # Want LOWEST correlation (best diversification)
+                if avg_corr < best_avg_corr:
+                    best_avg_corr = avg_corr
+                    best_cluster_id = cluster_id
+
+            # Add to best (most diversified) cluster or create new one
+            if best_cluster_id is not None:
+                clusters[best_cluster_id].append(ticker)
+            else:
+                # No suitable cluster - create new one
+                cluster_counter += 1
+                new_cluster_id = f"cluster_{cluster_counter}"
+                clusters[new_cluster_id] = [ticker]
+
+                # Check if we've exceeded max_clusters
+                if self.max_clusters is not None and len(clusters) > self.max_clusters:
+                    raise ValueError(
+                        f"Cannot satisfy max_clusters={self.max_clusters} with greedy worst-fit. "
+                        f"Created {len(clusters)} clusters."
+                    )
+
+        # Validate min_cluster_size by merging small clusters
+        clusters = self._merge_small_greedy(clusters, corr_matrix, tickers)
+
+        return clusters
+
+    def _merge_small_greedy(self,
+                           clusters: Dict[str, List[str]],
+                           corr_matrix: np.ndarray,
+                           tickers: List[str]) -> Dict[str, List[str]]:
+        """
+        Merge small clusters greedily to maximize diversification.
+
+        Args:
+            clusters: Initial clusters
+            corr_matrix: Correlation matrix
+            tickers: List of all tickers
+
+        Returns:
+            Clusters with small ones merged
+        """
+        merged = dict(clusters)
+
+        while True:
+            # Find small clusters
+            small = [(cid, ctickers) for cid, ctickers in merged.items()
+                    if len(ctickers) < self.min_cluster_size]
+
+            if not small:
+                break  # No more small clusters
+
+            # Take the smallest cluster
+            small.sort(key=lambda x: len(x[1]))
+            small_cid, small_tickers = small[0]
+
+            # Find best target cluster (LOWEST avg correlation = most diversification benefit)
+            best_target = None
+            best_corr = np.inf
+
+            for target_cid, target_tickers in merged.items():
+                if target_cid == small_cid:
+                    continue
+
+                # Check capacity
+                if len(target_tickers) + len(small_tickers) > self.max_cluster_size:
+                    continue
+
+                # Compute avg correlation between clusters
+                avg_corr = 0
+                count = 0
+                for s_ticker in small_tickers:
+                    s_idx = tickers.index(s_ticker)
+                    for t_ticker in target_tickers:
+                        t_idx = tickers.index(t_ticker)
+                        avg_corr += corr_matrix[s_idx, t_idx]
+                        count += 1
+
+                if count > 0:
+                    avg_corr /= count
+
+                # Want LOWEST correlation (best diversification)
+                if avg_corr < best_corr:
+                    best_corr = avg_corr
+                    best_target = target_cid
+
+            # Merge or fail
+            if best_target is not None:
+                merged[best_target].extend(small_tickers)
+                del merged[small_cid]
+            else:
+                raise ValueError(
+                    f"Cannot satisfy min_cluster_size={self.min_cluster_size}. "
+                    f"Cluster '{small_cid}' has {len(small_tickers)} assets but cannot be merged."
+                )
+
+        return merged

@@ -21,7 +21,8 @@ from .classical import ClassicalOptimizer
 from .equal_weight import EqualWeightOptimizer
 from .risk_parity import RiskParityOptimizer
 from .regularized import L1RegularizedOptimizer, L2RegularizedOptimizer
-from .quantum import IndependentClustersOptimizer, QuantumOptimizationResult, QuantumOptimizerWrapper
+from .quantum import IndependentClustersOptimizer, QuantumOptimizationResult, QuantumOptimizerWrapper  # Deprecated aliases
+from .discrete_levels import DiscreteLevelsOptimizer, DiscreteLevelsOptimizerWrapper
 
 __all__ = [
     'ClassicalOptimizer',
@@ -29,7 +30,9 @@ __all__ = [
     'RiskParityOptimizer',
     'L1RegularizedOptimizer',
     'L2RegularizedOptimizer',
-    'IndependentClustersOptimizer',
+    'IndependentClustersOptimizer',  # Deprecated, use DiscreteLevelsOptimizer
     'QuantumOptimizationResult',
     'QuantumOptimizerWrapper',
+    'DiscreteLevelsOptimizer',
+    'DiscreteLevelsOptimizerWrapper',
 ]
