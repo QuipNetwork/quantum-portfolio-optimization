@@ -18,7 +18,6 @@
 """Fetch subcommand - download historical stock data."""
 
 import click
-import os
 from pathlib import Path
 from qpo.utils.yahoo_api import download_stock_data
 

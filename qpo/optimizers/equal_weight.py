@@ -31,6 +31,9 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any
 
+from qpo.utils.constants import TRADING_DAYS_PER_YEAR
+from qpo.utils.matrix_ops import sanitize_covariance_matrix
+
 
 class EqualWeightOptimizer:
     """Equal-weight (1/N) portfolio - the naive baseline that often wins."""
@@ -64,11 +67,11 @@ class EqualWeightOptimizer:
         weights_series = pd.Series(weights, index=returns.columns)
 
         # Compute metrics
-        mu = returns.mean().values * 252
-        Sigma = returns.cov().values * 252
+        mu = returns.mean().values * TRADING_DAYS_PER_YEAR
+        Sigma = returns.cov().values * TRADING_DAYS_PER_YEAR
 
         # Sanitize inputs before metrics computation
-        mu, Sigma = self._sanitize_inputs(mu, Sigma)
+        mu, Sigma = sanitize_covariance_matrix(Sigma, mu)
         metrics = self._compute_metrics(weights_series, mu, Sigma)
 
         return {
@@ -76,39 +79,6 @@ class EqualWeightOptimizer:
             'metrics': metrics,
             'runtime': runtime
         }
-
-    def _sanitize_inputs(self, mu: np.ndarray, Sigma: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Sanitize mean returns and covariance matrix for numerical stability.
-
-        Args:
-            mu: Mean returns vector
-            Sigma: Covariance matrix
-
-        Returns:
-            (sanitized_mu, sanitized_Sigma)
-        """
-        # Make copies to avoid modifying originals
-        mu = mu.copy()
-        Sigma = Sigma.copy()
-
-        # Replace inf/nan in mu with 0
-        if not np.all(np.isfinite(mu)):
-            mu = np.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Replace inf/nan in Sigma with 0 (diagonal will be fixed below)
-        if not np.all(np.isfinite(Sigma)):
-            Sigma = np.nan_to_num(Sigma, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Ensure covariance matrix is positive semi-definite
-        # If diagonal elements are zero/negative, use small positive value
-        diag = np.diag(Sigma)
-        if np.any(diag <= 0):
-            min_var = 1e-8
-            diag = np.maximum(diag, min_var)
-            np.fill_diagonal(Sigma, diag)
-
-        return mu, Sigma
 
     def _compute_metrics(self,
                         w: pd.Series,

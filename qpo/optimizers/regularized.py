@@ -30,6 +30,9 @@ import pandas as pd
 import cvxpy as cp
 from typing import Dict, Any
 
+from qpo.utils.constants import TRADING_DAYS_PER_YEAR
+from qpo.utils.matrix_ops import sanitize_covariance_matrix
+
 
 class L1RegularizedOptimizer:
     """L1-regularized (Lasso) portfolio optimizer.
@@ -65,19 +68,12 @@ class L1RegularizedOptimizer:
         """
         start_time = time.time()
 
-        # Compute statistics with regularization for numerical stability
-        mu = returns.mean().values * 252
-        Sigma = returns.cov().values * 252
+        # Compute annualized statistics
+        mu = returns.mean().values * TRADING_DAYS_PER_YEAR
+        Sigma = returns.cov().values * TRADING_DAYS_PER_YEAR
 
-        # Handle NaN values that can occur with missing or constant data
-        mu = np.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
-        Sigma = np.nan_to_num(Sigma, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Force exact symmetry (eliminate floating-point errors)
-        Sigma = (Sigma + Sigma.T) / 2
-
-        # Add small diagonal term to prevent ill-conditioning
-        Sigma = Sigma + np.eye(len(Sigma)) * 1e-5
+        # Sanitize for numerical stability
+        mu, Sigma = sanitize_covariance_matrix(Sigma, mu)
 
         # Solve
         weights = self._solve(mu, Sigma)
@@ -198,19 +194,12 @@ class L2RegularizedOptimizer:
         """
         start_time = time.time()
 
-        # Compute statistics with regularization for numerical stability
-        mu = returns.mean().values * 252
-        Sigma = returns.cov().values * 252
+        # Compute annualized statistics
+        mu = returns.mean().values * TRADING_DAYS_PER_YEAR
+        Sigma = returns.cov().values * TRADING_DAYS_PER_YEAR
 
-        # Handle NaN values that can occur with missing or constant data
-        mu = np.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
-        Sigma = np.nan_to_num(Sigma, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Force exact symmetry (eliminate floating-point errors)
-        Sigma = (Sigma + Sigma.T) / 2
-
-        # Add small diagonal term to prevent ill-conditioning
-        Sigma = Sigma + np.eye(len(Sigma)) * 1e-5
+        # Sanitize for numerical stability
+        mu, Sigma = sanitize_covariance_matrix(Sigma, mu)
 
         # Solve
         weights = self._solve(mu, Sigma)

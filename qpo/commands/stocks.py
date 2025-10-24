@@ -18,7 +18,6 @@
 """Stocks subcommand - list active stocks with sufficient history."""
 
 import click
-import requests
 from qpo.utils.yahoo_api import has_sufficient_history
 
 

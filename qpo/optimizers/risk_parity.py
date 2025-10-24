@@ -32,6 +32,9 @@ import pandas as pd
 from scipy.optimize import minimize
 from typing import Dict, Any
 
+from qpo.utils.constants import TRADING_DAYS_PER_YEAR
+from qpo.utils.matrix_ops import sanitize_covariance_matrix
+
 
 class RiskParityOptimizer:
     """Risk Parity - equal risk contribution from each asset."""
@@ -66,14 +69,14 @@ class RiskParityOptimizer:
         """
         start_time = time.time()
 
-        # Compute covariance and mean
-        Sigma = returns.cov().values * 252  # Annualized
-        mu = returns.mean().values * 252
+        # Compute annualized statistics
+        Sigma = returns.cov().values * TRADING_DAYS_PER_YEAR
+        mu = returns.mean().values * TRADING_DAYS_PER_YEAR
 
-        # Sanitize inputs for numerical stability
-        mu, Sigma = self._sanitize_inputs(mu, Sigma)
+        # Sanitize for numerical stability
+        mu, Sigma = sanitize_covariance_matrix(Sigma, mu)
 
-        # Condition the covariance matrix for numerical stability
+        # Additional conditioning for risk parity
         Sigma = self._condition_covariance(Sigma)
 
         # Solve for risk parity weights
@@ -92,38 +95,6 @@ class RiskParityOptimizer:
             'metrics': metrics,
             'runtime': runtime
         }
-
-    def _sanitize_inputs(self, mu: np.ndarray, Sigma: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Sanitize mean returns and covariance matrix for numerical stability.
-
-        Args:
-            mu: Mean returns vector
-            Sigma: Covariance matrix
-
-        Returns:
-            (sanitized_mu, sanitized_Sigma)
-        """
-        # Make copies to avoid modifying originals
-        mu = mu.copy()
-        Sigma = Sigma.copy()
-
-        # Replace inf/nan in mu with 0
-        if not np.all(np.isfinite(mu)):
-            mu = np.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Replace inf/nan in Sigma with 0 (will be conditioned later)
-        if not np.all(np.isfinite(Sigma)):
-            Sigma = np.nan_to_num(Sigma, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Ensure diagonal elements are positive
-        diag = np.diag(Sigma)
-        if np.any(diag <= 0):
-            min_var = self.eps * 100
-            diag = np.maximum(diag, min_var)
-            np.fill_diagonal(Sigma, diag)
-
-        return mu, Sigma
 
     def _condition_covariance(self, Sigma: np.ndarray) -> np.ndarray:
         """

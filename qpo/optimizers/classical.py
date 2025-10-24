@@ -24,6 +24,9 @@ import cvxpy as cp
 from scipy.optimize import differential_evolution
 from typing import Dict, Any, Optional
 
+from qpo.utils.constants import TRADING_DAYS_PER_YEAR
+from qpo.utils.matrix_ops import sanitize_covariance_matrix
+
 
 def solve_markowitz_continuous(mu: np.ndarray,
                                Sigma: np.ndarray,
@@ -196,19 +199,12 @@ class ClassicalOptimizer:
         """
         start_time = time.time()
 
-        # Compute statistics with regularization for numerical stability
-        mu = returns.mean().values * 252  # Annualized
-        Sigma = returns.cov().values * 252  # Annualized
+        # Compute annualized statistics
+        mu = returns.mean().values * TRADING_DAYS_PER_YEAR
+        Sigma = returns.cov().values * TRADING_DAYS_PER_YEAR
 
-        # Handle NaN values that can occur with missing or constant data
-        mu = np.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
-        Sigma = np.nan_to_num(Sigma, nan=0.0, posinf=0.0, neginf=0.0)
-
-        # Force exact symmetry (eliminate floating-point errors)
-        Sigma = (Sigma + Sigma.T) / 2
-
-        # Add small diagonal term to prevent ill-conditioning
-        Sigma = Sigma + np.eye(len(Sigma)) * 1e-5
+        # Sanitize for numerical stability
+        mu, Sigma = sanitize_covariance_matrix(Sigma, mu)
 
         # Solve based on method
         if self.method == 'cvxpy':

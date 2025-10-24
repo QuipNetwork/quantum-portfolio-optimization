@@ -55,15 +55,16 @@ from clustering import (
 # Define available topologies from embeddings/templates/
 # Extracted from actual embedding files in embeddings/templates/
 # Format: (num_clusters, total_assets, levels, description)
+# Note: "12c × 12a" means 12 clusters with max 12 assets per cluster
 AVAILABLE_TOPOLOGIES = [
-    (12, 144, 8, "12c × 144a (8 levels)"),
-    (12, 192, 6, "12c × 192a (6 levels)"),
-    (13, 117, 10, "13c × 117a (10 levels)"),
-    (13, 117, 4, "13c × 117a (4 levels)"),
-    (13, 117, 8, "13c × 117a (8 levels)"),
-    (14, 196, 6, "14c × 196a (6 levels)"),
-    (16, 128, 6, "16c × 128a (6 levels)"),
-    (17, 289, 4, "17c × 289a (4 levels)"),
+    (12, 144, 8, "12c × 12a (8 levels)"),
+    (12, 192, 6, "12c × 16a (6 levels)"),
+    (13, 117, 10, "13c × 9a (10 levels)"),
+    (13, 117, 4, "13c × 9a (4 levels)"),
+    (13, 117, 8, "13c × 9a (8 levels)"),
+    (14, 196, 6, "14c × 14a (6 levels)"),
+    (16, 128, 6, "16c × 8a (6 levels)"),
+    (17, 289, 4, "17c × 17a (4 levels)"),
 ]
 
 
@@ -160,8 +161,10 @@ def print_compatibility_matrix(results: Dict[str, Dict[Tuple[int, int], Tuple[bo
     topo_col_width = 16
 
     header = f"{'Method':<{method_col_width}}"
-    for num_c, total_a, levels, _ in AVAILABLE_TOPOLOGIES:
-        header += f"{num_c}c×{total_a}a".center(topo_col_width)
+    for num_c, total_a, levels, desc in AVAILABLE_TOPOLOGIES:
+        # Extract the compact name from description (e.g., "12c × 12a")
+        compact_name = desc.split('(')[0].strip().replace(' ', '')
+        header += compact_name.center(topo_col_width)
     print(header)
     print("-" * len(header))
 

@@ -94,20 +94,20 @@ def find_max_cluster_size_for_levels_parallel(args):
     Wrapper for find_max_cluster_size_for_levels to work with multiprocessing.pool.map.
 
     Args:
-        args: Tuple of (n_levels, timeout, start_cluster_size, solver_name)
+        args: Tuple of (n_levels, timeout, start_cluster_size, solver_name, topology_info)
 
     Returns:
         list of result dicts for all successful configurations
     """
-    n_levels, timeout, start_cluster_size, solver_name = args
+    n_levels, timeout, start_cluster_size, solver_name, topology_info = args
 
     # Each process needs its own sampler connection
     sampler = DWaveSampler(solver=solver_name)
 
-    return find_max_cluster_size_for_levels(n_levels, sampler, timeout, start_cluster_size)
+    return find_max_cluster_size_for_levels(n_levels, sampler, topology_info, timeout, start_cluster_size)
 
 
-def test_configuration(n_clusters, assets_per_cluster, n_levels, sampler, timeout=600):
+def test_configuration(n_clusters, assets_per_cluster, n_levels, sampler, topology_info, timeout=600):
     """Test if a configuration can be embedded.
 
     Args:
@@ -115,6 +115,7 @@ def test_configuration(n_clusters, assets_per_cluster, n_levels, sampler, timeou
         assets_per_cluster: Assets per cluster
         n_levels: Number of discrete levels
         sampler: D-Wave sampler
+        topology_info: Dict with topology metadata (num_qubits, num_couplers, etc.)
         timeout: Embedding timeout in seconds
     """
 
@@ -142,8 +143,8 @@ def test_configuration(n_clusters, assets_per_cluster, n_levels, sampler, timeou
 
     n_source_vars = len(bqm.variables)
     n_source_edges = len(bqm.quadratic)
-    n_target_qubits = sampler.properties['num_qubits']
-    n_target_couplers = len(sampler.edgelist)
+    n_target_qubits = topology_info['num_qubits']
+    n_target_couplers = topology_info['num_couplers']
 
     print(f"\n[{time.strftime('%H:%M:%S')}] Running sanity checks...", flush=True)
 
@@ -200,7 +201,7 @@ def test_configuration(n_clusters, assets_per_cluster, n_levels, sampler, timeou
 
         print(f"[{time.strftime('%H:%M:%S')}] ✓ SUCCESS! ({elapsed/60:.1f} minutes)", flush=True)
         print(f"\n  Embedding Statistics:", flush=True)
-        print(f"    Qubits used: {total_qubits}/{sampler.properties['num_qubits']} ({100*total_qubits/sampler.properties['num_qubits']:.1f}%)", flush=True)
+        print(f"    Qubits used: {total_qubits}/{topology_info['num_qubits']} ({100*total_qubits/topology_info['num_qubits']:.1f}%)", flush=True)
         print(f"    Avg chain: {np.mean(chain_lengths):.2f}", flush=True)
         print(f"    Max chain: {max(chain_lengths)}", flush=True)
 
@@ -226,7 +227,7 @@ def test_configuration(n_clusters, assets_per_cluster, n_levels, sampler, timeou
         print(f"[{time.strftime('%H:%M:%S')}] ✗ ERROR: {e}", flush=True)
         return None
 
-def find_max_cluster_size_for_levels(n_levels, sampler, timeout=600, start_cluster_size=8):
+def find_max_cluster_size_for_levels(n_levels, sampler, topology_info, timeout=600, start_cluster_size=8):
     """Two-phase search to find maximum cluster configuration for a given n_levels.
 
     Phase 1: Find max cluster_size where num_clusters = assets_per_cluster (square config)
@@ -235,6 +236,7 @@ def find_max_cluster_size_for_levels(n_levels, sampler, timeout=600, start_clust
     Args:
         n_levels: Number of discrete levels to test
         sampler: D-Wave sampler
+        topology_info: Dict with topology metadata (num_qubits, num_couplers, etc.)
         timeout: Embedding timeout in seconds
         start_cluster_size: Starting cluster size for Phase 1
 
@@ -259,7 +261,7 @@ def find_max_cluster_size_for_levels(n_levels, sampler, timeout=600, start_clust
     # Find upper bound by doubling
     print(f"\nPhase 1a: Finding upper bound...", flush=True)
     while True:
-        result = test_configuration(cluster_size, cluster_size, n_levels, sampler, timeout)
+        result = test_configuration(cluster_size, cluster_size, n_levels, sampler, topology_info, timeout)
         if result:
             total = cluster_size * cluster_size
             print(f"  ✓ cluster_size={cluster_size} ({total} total assets): SUCCESS", flush=True)
@@ -284,7 +286,7 @@ def find_max_cluster_size_for_levels(n_levels, sampler, timeout=600, start_clust
 
     while lower < upper - 1:
         mid = (lower + upper) // 2
-        result = test_configuration(mid, mid, n_levels, sampler, timeout)
+        result = test_configuration(mid, mid, n_levels, sampler, topology_info, timeout)
 
         if result:
             total = mid * mid
@@ -314,7 +316,7 @@ def find_max_cluster_size_for_levels(n_levels, sampler, timeout=600, start_clust
     current_n_clusters = optimal_n_clusters + 1
 
     while True:
-        result = test_configuration(current_n_clusters, optimal_assets_per_cluster, n_levels, sampler, timeout)
+        result = test_configuration(current_n_clusters, optimal_assets_per_cluster, n_levels, sampler, topology_info, timeout)
 
         if result:
             total = current_n_clusters * optimal_assets_per_cluster
@@ -345,12 +347,23 @@ def find_optimal():
     print(f"Constraint: num_clusters = assets_per_cluster = cluster_size", flush=True)
     print(f"Timeout: 600 seconds (10 minutes) per embedding attempt", flush=True)
 
-    # Get QPU connection to extract solver info (will create new connections in each worker)
-    print(f"\nConnecting to QPU...", flush=True)
-    sampler = DWaveSampler(solver='Advantage2_system1.6')
-    print(f"  Solver: {sampler.properties['chip_id']}", flush=True)
-    print(f"  Topology: {sampler.properties.get('topology', {}).get('type', 'zephyr')}", flush=True)
-    print(f"  Working qubits: {len(sampler.nodelist)}", flush=True)
+    # Load topology from JSON file
+    topology_file = Path("embeddings/topologies/advantage2_system1.6.json")
+    print(f"\nLoading topology from {topology_file}...", flush=True)
+    with open(topology_file) as f:
+        topology_data = json.load(f)
+
+    topology_info = {
+        'num_qubits': topology_data['num_qubits'],
+        'num_couplers': topology_data['num_couplers'],
+        'chip_id': topology_data['chip_id'],
+        'topology_type': topology_data['topology_type']
+    }
+
+    print(f"  Solver: {topology_info['chip_id']}", flush=True)
+    print(f"  Topology: {topology_info['topology_type']}", flush=True)
+    print(f"  Working qubits: {topology_info['num_qubits']}", flush=True)
+    print(f"  Couplers: {topology_info['num_couplers']}", flush=True)
 
     solver_name = 'Advantage2_system1.6'
 
@@ -367,7 +380,7 @@ def find_optimal():
 
     # Create args for each n_levels value
     parallel_args = [
-        (n_levels, timeout, start_cluster_size, solver_name)
+        (n_levels, timeout, start_cluster_size, solver_name, topology_info)
         for n_levels in n_levels_list
     ]
 
@@ -409,7 +422,7 @@ def find_optimal():
         print(f"\n  n_levels = {n_levels}: {len(configs)} configurations", flush=True)
         for cfg in configs:
             print(f"    {cfg['n_clusters']} clusters × {cfg['assets_per_cluster']} assets = {cfg['total_assets']} total", flush=True)
-            print(f"      Variables: {cfg['n_variables']}, Qubits: {cfg['total_qubits']} ({cfg['total_qubits']/sampler.properties['num_qubits']*100:.1f}%)", flush=True)
+            print(f"      Variables: {cfg['n_variables']}, Qubits: {cfg['total_qubits']} ({cfg['total_qubits']/topology_info['num_qubits']*100:.1f}%)", flush=True)
 
 
     # Save all successful templates
@@ -425,9 +438,8 @@ def find_optimal():
     sparsif_str = f"cov_cutoff=0.0,diag_risk=0.0,risk_abs=0.0,risk_pct=None,max_deg=None,preserve_budget=True"
     sparsif_sig = hashlib.sha256(sparsif_str.encode()).hexdigest()[:16]
 
-    # Get topology information
-    topology_type = sampler.properties.get('topology', {}).get('type', 'zephyr')
-    topology_family = topology_type.lower() if topology_type else 'zephyr'
+    # Get topology information from loaded topology_info
+    topology_family = topology_info['topology_type'].lower()
 
     saved_files = []
     for result in all_results:
@@ -449,9 +461,9 @@ def find_optimal():
             'topology': {
                 'name': 'Advantage2_system1.6',
                 'family': topology_family,
-                'chip_id': sampler.properties['chip_id'],
-                'num_qubits': len(sampler.nodelist),
-                'num_couplers': len(sampler.edgelist),
+                'chip_id': topology_info['chip_id'],
+                'num_qubits': topology_info['num_qubits'],
+                'num_couplers': topology_info['num_couplers'],
             },
             'shape': {
                 'n_clusters': result['n_clusters'] + 1,  # Including meta-cluster
@@ -464,7 +476,7 @@ def find_optimal():
                 'n_variables': result['n_variables'],
                 'n_quadratic': result['n_quadratic'],
                 'total_qubits_used': result['total_qubits'],
-                'qpu_utilization_pct': float(result['total_qubits'] / len(sampler.nodelist) * 100),
+                'qpu_utilization_pct': float(result['total_qubits'] / topology_info['num_qubits'] * 100),
                 'avg_chain_length': result['avg_chain_length'],
                 'max_chain_length': result['max_chain_length'],
                 'min_chain_length': result.get('min_chain_length', result['avg_chain_length']),
@@ -485,7 +497,7 @@ def find_optimal():
 
         saved_files.append(output_file)
         print(f"  ✓ Saved: {filename}", flush=True)
-        print(f"      {result['total_assets']} assets, {result['total_qubits']} qubits ({result['total_qubits']/len(sampler.nodelist)*100:.1f}%)", flush=True)
+        print(f"      {result['total_assets']} assets, {result['total_qubits']} qubits ({result['total_qubits']/topology_info['num_qubits']*100:.1f}%)", flush=True)
 
     print(f"\n{'='*70}", flush=True)
     print(f"COMPLETE", flush=True)
