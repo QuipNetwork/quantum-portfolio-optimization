@@ -33,7 +33,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 import pandas as pd
-from qpo.optimizers.quantum import IndependentClustersOptimizer, QuantumOptimizerWrapper
+from qpo.optimizers.discrete_levels import DiscreteLevelsOptimizer, DiscreteLevelsOptimizerWrapper
 from qpo.optimizers.classical import ClassicalOptimizer
 from qpo.optimizers.backtest import Backtester
 from clustering import CorrelationClusterer
@@ -50,7 +50,7 @@ def create_optimizers(solver_type='simulated'):
     )
 
     # 1. Original Single-Pass Quantum (Baseline)
-    quantum_single = IndependentClustersOptimizer(
+    quantum_single = DiscreteLevelsOptimizer(
         max_cluster_size=18,
         n_bits=10,
         alpha=1.0,
@@ -63,10 +63,10 @@ def create_optimizers(solver_type='simulated'):
         clusterer=clusterer,
         use_two_pass=False  # Original approach
     )
-    optimizers['Quantum (Single-Pass)'] = QuantumOptimizerWrapper(quantum_single)
+    optimizers['Quantum (Single-Pass)'] = DiscreteLevelsOptimizerWrapper(quantum_single)
 
     # 2. Two-Pass Hierarchical Quantum (New)
-    quantum_twopass = IndependentClustersOptimizer(
+    quantum_twopass = DiscreteLevelsOptimizer(
         max_cluster_size=18,
         n_bits=10,
         alpha=1.0,  # Pass 1: intra-cluster
@@ -81,10 +81,10 @@ def create_optimizers(solver_type='simulated'):
         inter_cluster_alpha=1.0,  # Pass 2: inter-cluster
         inter_cluster_beta=1.0
     )
-    optimizers['Quantum (Two-Pass)'] = QuantumOptimizerWrapper(quantum_twopass)
+    optimizers['Quantum (Two-Pass)'] = DiscreteLevelsOptimizerWrapper(quantum_twopass)
 
     # 3. Two-Pass with Aggressive Inter-Cluster
-    quantum_twopass_aggressive = IndependentClustersOptimizer(
+    quantum_twopass_aggressive = DiscreteLevelsOptimizer(
         max_cluster_size=18,
         n_bits=10,
         alpha=1.0,
@@ -99,7 +99,7 @@ def create_optimizers(solver_type='simulated'):
         inter_cluster_alpha=3.0,  # More aggressive cluster allocation
         inter_cluster_beta=1.0
     )
-    optimizers['Quantum (Two-Pass Aggressive)'] = QuantumOptimizerWrapper(quantum_twopass_aggressive)
+    optimizers['Quantum (Two-Pass Aggressive)'] = DiscreteLevelsOptimizerWrapper(quantum_twopass_aggressive)
 
     # 4. Classical Mean-Variance (Benchmark)
     optimizers['Mean-Variance (Global)'] = ClassicalOptimizer(gamma=1.0, method='cvxpy')

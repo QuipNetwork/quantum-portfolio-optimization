@@ -18,6 +18,9 @@ from qpo.qubo.discrete_levels import DiscreteLevelFormulator
 from dotenv import load_dotenv
 import json
 import time
+import multiprocessing as mp
+from functools import partial
+import os
 
 load_dotenv()
 
@@ -58,7 +61,7 @@ def create_test_bqm(n_clusters, assets_per_cluster, n_levels=10):
         )
 
         # No budget constraint (sparse graph)
-        bqm = formulator.formulate_cluster(cluster_tickers, mu, Sigma, include_budget_constraint=False)
+        bqm = formulator.formulate_cluster(cluster_tickers, mu, Sigma)
 
         if combined_bqm is None:
             combined_bqm = bqm
@@ -81,10 +84,28 @@ def create_test_bqm(n_clusters, assets_per_cluster, n_levels=10):
     )
 
     # No budget constraint (sparse graph)
-    meta_bqm = formulator.formulate_cluster(meta_tickers, meta_mu, meta_Sigma, include_budget_constraint=False)
+    meta_bqm = formulator.formulate_cluster(meta_tickers, meta_mu, meta_Sigma)
     combined_bqm.update(meta_bqm)
 
     return combined_bqm, len(all_assets)
+
+def find_max_cluster_size_for_levels_parallel(args):
+    """
+    Wrapper for find_max_cluster_size_for_levels to work with multiprocessing.pool.map.
+
+    Args:
+        args: Tuple of (n_levels, timeout, start_cluster_size, solver_name)
+
+    Returns:
+        list of result dicts for all successful configurations
+    """
+    n_levels, timeout, start_cluster_size, solver_name = args
+
+    # Each process needs its own sampler connection
+    sampler = DWaveSampler(solver=solver_name)
+
+    return find_max_cluster_size_for_levels(n_levels, sampler, timeout, start_cluster_size)
+
 
 def test_configuration(n_clusters, assets_per_cluster, n_levels, sampler, timeout=600):
     """Test if a configuration can be embedded.
@@ -99,8 +120,9 @@ def test_configuration(n_clusters, assets_per_cluster, n_levels, sampler, timeou
 
     total_assets = n_clusters * assets_per_cluster
 
+    pid = os.getpid()
     print(f"\n{'='*70}", flush=True)
-    print(f"TESTING: {n_clusters} clusters × {assets_per_cluster} assets/cluster = {total_assets} total assets × {n_levels} levels", flush=True)
+    print(f"[PID {pid}] TESTING: {n_clusters} clusters × {assets_per_cluster} assets/cluster = {total_assets} total assets × {n_levels} levels", flush=True)
     print(f"{'='*70}", flush=True)
 
     start = time.time()
@@ -208,7 +230,7 @@ def find_max_cluster_size_for_levels(n_levels, sampler, timeout=600, start_clust
     """Two-phase search to find maximum cluster configuration for a given n_levels.
 
     Phase 1: Find max cluster_size where num_clusters = assets_per_cluster (square config)
-    Phase 2: Keep optimal num_clusters, increase assets_per_cluster by 1 until failure
+    Phase 2: Keep optimal assets_per_cluster, increase num_clusters by 1 until failure
 
     Args:
         n_levels: Number of discrete levels to test
@@ -283,33 +305,26 @@ def find_max_cluster_size_for_levels(n_levels, sampler, timeout=600, start_clust
     print(f"  Configuration: {optimal_n_clusters} clusters × {optimal_assets_per_cluster} assets = {optimal_n_clusters * optimal_assets_per_cluster} total assets", flush=True)
     print(f"{'='*70}", flush=True)
 
-    # PHASE 2: Keep num_clusters fixed, increase assets_per_cluster by 1 until failure
+    # PHASE 2: Keep assets_per_cluster fixed, increase num_clusters by 1 until failure
     print(f"\n{'='*70}", flush=True)
-    print(f"PHASE 2: Increasing assets_per_cluster (keep num_clusters={optimal_n_clusters})", flush=True)
-    print(f"Meta-cluster constraint: assets_per_cluster must not exceed num_clusters", flush=True)
+    print(f"PHASE 2: Increasing num_clusters (keep assets_per_cluster={optimal_assets_per_cluster})", flush=True)
+    print(f"Meta-cluster constraint: meta-cluster needs {optimal_n_clusters+1} assets minimum", flush=True)
     print(f"{'='*70}", flush=True)
 
-    current_assets_per_cluster = optimal_assets_per_cluster + 1
+    current_n_clusters = optimal_n_clusters + 1
 
     while True:
-        # Meta-cluster cannot have more assets than there are clusters
-        # (meta-cluster has num_clusters assets, one per cluster)
-        if current_assets_per_cluster > optimal_n_clusters:
-            print(f"\n✗ Stopping: assets_per_cluster={current_assets_per_cluster} would exceed num_clusters={optimal_n_clusters}", flush=True)
-            print(f"  Meta-cluster cannot be encoded (needs {optimal_n_clusters} levels but assets have {current_assets_per_cluster} levels)", flush=True)
-            break
-
-        result = test_configuration(optimal_n_clusters, current_assets_per_cluster, n_levels, sampler, timeout)
+        result = test_configuration(current_n_clusters, optimal_assets_per_cluster, n_levels, sampler, timeout)
 
         if result:
-            total = optimal_n_clusters * current_assets_per_cluster
-            print(f"  ✓ {optimal_n_clusters} clusters × {current_assets_per_cluster} assets ({total} total): SUCCESS", flush=True)
+            total = current_n_clusters * optimal_assets_per_cluster
+            print(f"  ✓ {current_n_clusters} clusters × {optimal_assets_per_cluster} assets ({total} total): SUCCESS", flush=True)
             all_successful_configs.append(result)
-            current_assets_per_cluster += 1
+            current_n_clusters += 1
         else:
-            total = optimal_n_clusters * current_assets_per_cluster
-            print(f"  ✗ {optimal_n_clusters} clusters × {current_assets_per_cluster} assets ({total} total): FAILED", flush=True)
-            print(f"  Maximum assets_per_cluster found: {current_assets_per_cluster - 1}", flush=True)
+            total = current_n_clusters * optimal_assets_per_cluster
+            print(f"  ✗ {current_n_clusters} clusters × {optimal_assets_per_cluster} assets ({total} total): FAILED", flush=True)
+            print(f"  Maximum num_clusters found: {current_n_clusters - 1}", flush=True)
             break
 
     print(f"\n{'='*70}", flush=True)
@@ -330,27 +345,45 @@ def find_optimal():
     print(f"Constraint: num_clusters = assets_per_cluster = cluster_size", flush=True)
     print(f"Timeout: 600 seconds (10 minutes) per embedding attempt", flush=True)
 
-    # Get QPU
+    # Get QPU connection to extract solver info (will create new connections in each worker)
     print(f"\nConnecting to QPU...", flush=True)
     sampler = DWaveSampler(solver='Advantage2_system1.6')
     print(f"  Solver: {sampler.properties['chip_id']}", flush=True)
     print(f"  Topology: {sampler.properties.get('topology', {}).get('type', 'zephyr')}", flush=True)
     print(f"  Working qubits: {len(sampler.nodelist)}", flush=True)
 
-    # Test n_levels in order: 4, 6, 8
+    solver_name = 'Advantage2_system1.6'
+
+    # Test n_levels in parallel: 4, 6, 8
     n_levels_list = [4, 6, 8]
     timeout = 600  # 10 minutes
+    start_cluster_size = 8
 
-    # Store all successful results
+    # Run in parallel across n_levels
+    num_workers = len(n_levels_list)  # One worker per n_levels value
+    print(f"\n{'='*70}", flush=True)
+    print(f"PARALLELIZING SEARCH ACROSS {num_workers} n_levels VALUES", flush=True)
+    print(f"{'='*70}", flush=True)
+
+    # Create args for each n_levels value
+    parallel_args = [
+        (n_levels, timeout, start_cluster_size, solver_name)
+        for n_levels in n_levels_list
+    ]
+
+    # Run searches in parallel
+    with mp.Pool(processes=num_workers) as pool:
+        results_by_levels = pool.map(find_max_cluster_size_for_levels_parallel, parallel_args)
+
+    # Flatten results
     all_results = []
-
-    for n_levels in n_levels_list:
-        configs = find_max_cluster_size_for_levels(n_levels, sampler, timeout, start_cluster_size=8)
-
+    for i, configs in enumerate(results_by_levels):
+        n_levels = n_levels_list[i]
         if configs:
             all_results.extend(configs)
+            print(f"\n✓ n_levels={n_levels}: Found {len(configs)} configurations", flush=True)
         else:
-            print(f"\n✗ Failed to find any embeddable configuration for n_levels={n_levels}", flush=True)
+            print(f"\n✗ n_levels={n_levels}: Failed to find any embeddable configuration", flush=True)
 
     # Summary
     print(f"\n{'='*70}", flush=True)
@@ -443,7 +476,8 @@ def find_optimal():
         }
 
         # Standardized filename: portfolio_{C}c_{A}a_{L}l.json
-        filename = f"portfolio_{result['n_clusters']}c_{result['total_assets']}a_{result['n_levels']}l.json"
+        # C = num_clusters, A = assets_per_cluster, L = num_levels
+        filename = f"portfolio_{result['n_clusters']}c_{result['assets_per_cluster']}a_{result['n_levels']}l.json"
         output_file = output_dir / filename
 
         with open(output_file, 'w') as f:

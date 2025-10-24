@@ -40,8 +40,7 @@ class DiscreteLevelsOptimizer:
                  n_levels: int = 6,  # Match available templates (most are 6 levels)
                  alpha: float = 10,
                  beta: float = 2,
-                 budget_penalty: float = 0.0,  
-                 thermometer_penalty: float = 10.0, 
+                 thermometer_penalty: float = 10.0,
                  solver_type: str = 'simulated',
                  num_reads: Optional[int] = None,
                  num_sweeps: Optional[int] = None,
@@ -50,30 +49,40 @@ class DiscreteLevelsOptimizer:
                  clusterer: Optional[Any] = None,
                  expected_assets_per_cluster: Optional[int] = None,
                  expected_n_clusters: Optional[int] = None,
-                 auto_select_template: bool = True):
+                 auto_select_template: bool = True,
+                 k_spread: float = 0.0,
+                 l1_sparsity_penalty: float = 0.0,
+                 use_thermometer_cutoff: bool = False):
         """
         Initialize discrete levels optimizer.
 
         Args:
-            n_levels: Number of discrete weight levels (default 4)
-            alpha: Return coefficient (default 5.0, aggressive)
-            beta: Risk coefficient (default 2.5, ratio=0.5)
+            n_levels: Number of discrete weight levels (default 6)
+            alpha: Return coefficient (default 10.0)
+            beta: Risk coefficient (default 2.0)
             thermometer_penalty: Penalty for invalid thermometer encoding
             solver_type: 'simulated' or 'qpu'
-            num_reads: Number of annealing samples (default: 512 for SA, 10 for QPU)
+            num_reads: Number of annealing samples (default: 256 for SA, 10 for QPU)
             num_sweeps: Sweeps for simulated annealing (default 256, ignored for QPU)
             max_cluster_size: Maximum assets per cluster (19 for native embedding)
             portfolio_info_csv: Path to portfolio info for sector data
             clusterer: Custom clusterer (default: SectorClusterer)
             expected_assets_per_cluster: For QPU with templates, pad clusters to this size
             expected_n_clusters: For QPU with templates, pad to this many clusters
+            auto_select_template: Automatically select best template for portfolio size
+            k_spread: Concentration parameter (0.0=no spread, 1.0-3.0=moderate spread)
+            l1_sparsity_penalty: L1 regularization penalty (λ > 0 promotes sparsity, try 0.01-1.0)
+                                Adds +λ·||w||₁ to objective → fewer holdings
+            use_thermometer_cutoff: If True, keep only assets with maximum thermometer level
         """
         self.n_levels = n_levels
         self.alpha = alpha
         self.beta = beta
-        self.budget_penalty = budget_penalty
         self.thermometer_penalty = thermometer_penalty
         self.solver_type = solver_type
+        self.k_spread = k_spread
+        self.l1_sparsity_penalty = l1_sparsity_penalty
+        self.use_thermometer_cutoff = use_thermometer_cutoff
 
         # Set num_reads based on solver type if not specified
         if num_reads is None:
@@ -97,8 +106,8 @@ class DiscreteLevelsOptimizer:
             n_levels=n_levels,
             alpha=alpha,
             beta=beta,
-            budget_penalty=budget_penalty,
-            thermometer_penalty=thermometer_penalty
+            thermometer_penalty=thermometer_penalty,
+            l1_sparsity_penalty=l1_sparsity_penalty
         )
 
         # Create embedding manager
@@ -106,10 +115,9 @@ class DiscreteLevelsOptimizer:
 
         # Create clusterer
         if clusterer is None:
-            self.clusterer = SectorClusterer(
-                max_cluster_size=max_cluster_size,
-                target_cluster_size=max_cluster_size // 2,
-                sector_map=portfolio_info_csv
+            from clustering import CorrelationClusterer
+            self.clusterer = CorrelationClusterer(
+                target_cluster_size=max_cluster_size
             )
         else:
             self.clusterer = clusterer
@@ -184,13 +192,37 @@ class DiscreteLevelsOptimizer:
             padded_mu[dummy] = 0.0  # Zero expected return
 
         # Extend Sigma with zeros for dummy assets
-        padded_Sigma = Sigma.copy()
+        # Build dummy covariance matrix efficiently (avoid fragmentation)
+        if dummy_tickers:
+            # Create dummy rows/columns all at once
+            n_dummies = len(dummy_tickers)
+            n_existing = len(Sigma)
 
-        for dummy in dummy_tickers:
-            # Add zero covariance row/column
-            padded_Sigma.loc[dummy, :] = 0.0
-            padded_Sigma.loc[:, dummy] = 0.0
-            padded_Sigma.loc[dummy, dummy] = 1e-10  # Tiny variance to avoid singularity
+            # Create zero matrix for dummy cross-covariances
+            dummy_block = pd.DataFrame(
+                0.0,
+                index=dummy_tickers,
+                columns=list(Sigma.columns) + dummy_tickers
+            )
+
+            # Create dummy-to-existing covariances (all zeros)
+            existing_to_dummy = pd.DataFrame(
+                0.0,
+                index=Sigma.index,
+                columns=dummy_tickers
+            )
+
+            # Set tiny variance on diagonal for dummy assets
+            for dummy in dummy_tickers:
+                dummy_block.loc[dummy, dummy] = 1e-10
+
+            # Concatenate efficiently
+            padded_Sigma = pd.concat([
+                pd.concat([Sigma, existing_to_dummy], axis=1),
+                dummy_block
+            ], axis=0)
+        else:
+            padded_Sigma = Sigma.copy()
 
         return padded_clusters, padded_mu, padded_Sigma, real_tickers
 
@@ -266,12 +298,10 @@ class DiscreteLevelsOptimizer:
             cluster_mu = pd.Series(mu[cluster_tickers])
             cluster_Sigma = pd.DataFrame(Sigma.loc[cluster_tickers, cluster_tickers])
 
-            # Create BQM for this cluster WITHOUT budget constraint
-            # Budget constraint creates O(N²×L²) dense couplings, defeating sparse graph benefits
+            # Create BQM for this cluster
             # Post-processing normalizes weights, so budget constraint is unnecessary
             bqm = self.formulator.formulate_cluster(
-                cluster_tickers, cluster_mu, cluster_Sigma,
-                include_budget_constraint=False
+                cluster_tickers, cluster_mu, cluster_Sigma
             )
 
             # Manually merge linear terms (h)
@@ -428,6 +458,168 @@ class DiscreteLevelsOptimizer:
 
         return final_weights
 
+    def _apply_return_adjustment(self, weights: pd.Series, returns: pd.DataFrame,
+                                 tickers: list) -> pd.Series:
+        """
+        Adjust weights by annualized returns over training period.
+
+        Applied to ALL clusters (asset clusters and meta-cluster).
+
+        New approach: w' = (% of cluster) * (YTD return as percentage)
+        Example: If asset has 21.9% of cluster and +24.17% YTD return:
+                 score = 21.9 * 24.17 = 529.323
+
+        Args:
+            weights: Raw weights from optimizer
+            returns: Training period returns DataFrame
+            tickers: List of tickers corresponding to weights
+
+        Returns:
+            Return-adjusted weights
+        """
+        # Calculate annualized returns over training period (YTD)
+        annualized_returns = pd.Series(index=weights.index, dtype=float)
+        for ticker in weights.index:
+            if ticker in returns.columns:
+                # Annualized return for single asset: daily_mean * 252
+                annualized_returns[ticker] = returns[ticker].mean() * 252
+            elif ticker in tickers:
+                # For clusters: average returns across cluster members
+                cluster_tickers = tickers
+                valid_tickers = [t for t in cluster_tickers if t in returns.columns]
+                if len(valid_tickers) > 0:
+                    annualized_returns[ticker] = (
+                        returns[valid_tickers].mean(axis=1).mean() * 252
+                    )
+                else:
+                    annualized_returns[ticker] = 0.0
+            else:
+                annualized_returns[ticker] = 0.0
+
+        # Convert weights to percentages (0-100 scale)
+        weight_pct = weights * 100
+
+        # Convert returns to percentage points (0.2417 -> 24.17)
+        return_pct = annualized_returns * 100
+
+        # Score = weight_percentage * return_percentage
+        # Example: 21.9% weight * 24.17% return = 529.323
+        scores = weight_pct * return_pct
+
+        # Handle negative returns gracefully (use absolute value to keep relative ranking)
+        # This prevents negative scores from flipping the ordering
+        scores_abs = scores.abs()
+
+        # Normalize scores to weights
+        if scores_abs.sum() > 0:
+            final_weights = scores_abs / scores_abs.sum()
+        else:
+            # Fallback: use original weights
+            final_weights = weights / weights.sum() if weights.sum() > 0 else weights
+
+        return final_weights
+
+    def _apply_k_spread(self, weights: pd.Series) -> pd.Series:
+        """
+        Apply k-based spread to weights using power function.
+
+        Applied ONLY to meta-cluster weights.
+
+        Args:
+            weights: Return-adjusted weights
+
+        Returns:
+            Spread-adjusted weights
+        """
+        if self.k_spread <= 0:
+            return weights
+
+        # Apply k-based spread: w' = w^(1+k)
+        spread_power = 1 + self.k_spread
+        spread_weights = weights ** spread_power
+
+        # Normalize
+        if spread_weights.sum() > 0:
+            final_weights = spread_weights / spread_weights.sum()
+        else:
+            final_weights = weights
+
+        return final_weights
+
+    def _apply_thermometer_cutoff(self, weights: pd.Series) -> pd.Series:
+        """
+        Keep only assets with maximum (or near-maximum) thermometer level.
+
+        The QUBO solver sets more bits for "better" assets. This filtering
+        keeps only the highest-confidence picks based on thermometer encoding.
+
+        Args:
+            weights: Portfolio weights from optimizer
+
+        Returns:
+            Filtered weights (only max-level assets, renormalized)
+        """
+        if not self.use_thermometer_cutoff:
+            return weights
+
+        # Get max weight (represents maximum thermometer level)
+        max_weight = weights.max()
+
+        # Keep only assets at or near max level (within 10% tolerance for numerical precision)
+        threshold = max_weight * 0.9
+        high_confidence = weights[weights >= threshold]
+
+        # Renormalize
+        if high_confidence.sum() > 0:
+            filtered_weights = high_confidence / high_confidence.sum()
+        else:
+            # Fallback: keep original weights
+            filtered_weights = weights
+
+        # Expand to include zeros for all original assets
+        final_weights = pd.Series(0.0, index=weights.index)
+        final_weights[filtered_weights.index] = filtered_weights
+
+        return final_weights
+
+    def _compute_dynamic_meta_beta(self, returns: pd.DataFrame) -> float:
+        """
+        Compute dynamic risk aversion for meta-cluster based on market conditions.
+
+        Strategy: Inversely proportional to market returns
+        - Bull market (high returns) → lower beta (less risk-averse, take more risk)
+        - Bear market (low/negative returns) → higher beta (more risk-averse, preserve capital)
+
+        Args:
+            returns: Training period returns
+
+        Returns:
+            Adjusted beta for meta-cluster
+        """
+        # Compute market return over training period (annualized)
+        market_return = returns.mean().mean() * 252
+
+        # Base beta
+        base_beta = self.beta
+
+        # Dynamic adjustment: beta_meta = base_beta * (1 + k / (1 + market_return))
+        # When market_return is high (e.g., 0.5 = 50%), beta decreases (more aggressive)
+        # When market_return is low/negative, beta increases (more defensive)
+
+        # Scaling factor (controls sensitivity)
+        k = 2.0  # Typical: 2x adjustment range
+
+        # Compute adjusted beta
+        if market_return > -0.5:  # Avoid division issues in extreme bear markets
+            beta_meta = base_beta * (1 + k / (1 + market_return))
+        else:
+            beta_meta = base_beta * 5.0  # Extreme defensive in severe bear market
+
+        # Clamp to reasonable range
+        beta_meta = max(base_beta * 0.5, min(beta_meta, base_beta * 5.0))
+
+        return beta_meta
+
     def optimize(self, returns: pd.DataFrame) -> dict:
         """
         Optimize portfolio weights.
@@ -527,11 +719,24 @@ class DiscreteLevelsOptimizer:
             # 1. Create BQMs for all asset clusters
             combined_bqm, cluster_info = self._combine_cluster_bqms(clusters, mu, Sigma)
 
-            # 2. Create meta-cluster BQM (without budget constraint)
+            # 2. Create meta-cluster BQM with dynamic risk aversion
             meta_cluster_tickers = list(cluster_ids)
-            meta_bqm = self.formulator.formulate_cluster(
-                meta_cluster_tickers, cluster_mu, cluster_Sigma,
-                include_budget_constraint=False
+
+            # Compute dynamic beta for meta-cluster (inversely proportional to market conditions)
+            meta_beta = self._compute_dynamic_meta_beta(returns)
+
+            # Create temporary formulator with adjusted beta for meta-cluster
+            from qpo.qubo.discrete_levels import DiscreteLevelFormulator
+            meta_formulator = DiscreteLevelFormulator(
+                n_levels=self.n_levels,
+                alpha=self.alpha,
+                beta=meta_beta,  # Dynamic beta based on market conditions
+                thermometer_penalty=self.thermometer_penalty,
+                l1_sparsity_penalty=self.l1_sparsity_penalty
+            )
+
+            meta_bqm = meta_formulator.formulate_cluster(
+                meta_cluster_tickers, cluster_mu, cluster_Sigma
             )
 
             # 3. Combine asset clusters + meta-cluster BQMs
@@ -587,13 +792,23 @@ class DiscreteLevelsOptimizer:
                     best_sample, cluster_tickers
                 )
 
+                # Step 1: Apply return adjustment to ALL clusters
+                return_adjusted_weights = self._apply_return_adjustment(
+                    cluster_weights, returns, cluster_tickers
+                )
+
                 if cluster_id == 'META_CLUSTER':
-                    # Store meta-cluster weights separately
-                    meta_cluster_weights = cluster_weights
+                    # Step 2: Apply k-spread ONLY to meta-cluster
+                    meta_cluster_weights = self._apply_k_spread(return_adjusted_weights)
                 else:
-                    # Store asset cluster weights
+                    # Asset clusters: apply thermometer cutoff per-cluster (if enabled)
+                    if self.use_thermometer_cutoff:
+                        filtered_weights = self._apply_thermometer_cutoff(return_adjusted_weights)
+                    else:
+                        filtered_weights = return_adjusted_weights
+
                     cluster_results[cluster_id] = {
-                        'weights': cluster_weights,
+                        'weights': filtered_weights,
                         'tickers': cluster_tickers
                     }
 
@@ -608,11 +823,24 @@ class DiscreteLevelsOptimizer:
             # 1. Create BQMs for all asset clusters
             combined_bqm, cluster_info = self._combine_cluster_bqms(clusters, mu, Sigma)
 
-            # 2. Create meta-cluster BQM (without budget constraint)
+            # 2. Create meta-cluster BQM with dynamic risk aversion
             meta_cluster_tickers = list(cluster_ids)
-            meta_bqm = self.formulator.formulate_cluster(
-                meta_cluster_tickers, cluster_mu, cluster_Sigma,
-                include_budget_constraint=False
+
+            # Compute dynamic beta for meta-cluster (inversely proportional to market conditions)
+            meta_beta = self._compute_dynamic_meta_beta(returns)
+
+            # Create temporary formulator with adjusted beta for meta-cluster
+            from qpo.qubo.discrete_levels import DiscreteLevelFormulator
+            meta_formulator = DiscreteLevelFormulator(
+                n_levels=self.n_levels,
+                alpha=self.alpha,
+                beta=meta_beta,  # Dynamic beta based on market conditions
+                thermometer_penalty=self.thermometer_penalty,
+                l1_sparsity_penalty=self.l1_sparsity_penalty
+            )
+
+            meta_bqm = meta_formulator.formulate_cluster(
+                meta_cluster_tickers, cluster_mu, cluster_Sigma
             )
 
             # 3. Combine asset clusters + meta-cluster BQMs
@@ -650,13 +878,23 @@ class DiscreteLevelsOptimizer:
                     best_sample, cluster_tickers
                 )
 
+                # Step 1: Apply return adjustment to ALL clusters
+                return_adjusted_weights = self._apply_return_adjustment(
+                    cluster_weights, returns, cluster_tickers
+                )
+
                 if cluster_id == 'META_CLUSTER':
-                    # Store meta-cluster weights separately
-                    meta_cluster_weights = cluster_weights
+                    # Step 2: Apply k-spread ONLY to meta-cluster
+                    meta_cluster_weights = self._apply_k_spread(return_adjusted_weights)
                 else:
-                    # Store asset cluster weights
+                    # Asset clusters: apply thermometer cutoff per-cluster (if enabled)
+                    if self.use_thermometer_cutoff:
+                        filtered_weights = self._apply_thermometer_cutoff(return_adjusted_weights)
+                    else:
+                        filtered_weights = return_adjusted_weights
+
                     cluster_results[cluster_id] = {
-                        'weights': cluster_weights,
+                        'weights': filtered_weights,
                         'tickers': cluster_tickers
                     }
 
@@ -664,6 +902,8 @@ class DiscreteLevelsOptimizer:
             final_weights = self._apply_meta_cluster_weights(
                 cluster_results, meta_cluster_weights, real_tickers
             )
+
+        # Thermometer cutoff is now applied per-cluster (above), not on final weights
 
         # Compute metrics using original mu/Sigma (before padding)
         # Align weights with original data

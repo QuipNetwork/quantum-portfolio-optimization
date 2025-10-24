@@ -98,6 +98,15 @@ class Backtester:
             runtimes.append(runtime)
             rebalance_dates.append(prices.index[train_end])
 
+            # Calculate optimizer's return on training data
+            portfolio_train_returns = (train_returns * weights).sum(axis=1)
+            optimizer_ytd_return = (1 + portfolio_train_returns).prod() - 1
+
+            # Print optimizer performance
+            print(f"  Rebalance {len(runtimes)}: {prices.index[train_end].date()} | "
+                  f"Opt YTD: {optimizer_ytd_return*100:+.2f}% | "
+                  f"Runtime: {runtime:.3f}s")
+
             # Test period: hold portfolio
             test_prices = prices.iloc[train_end:test_end]
             test_returns = returns.iloc[train_end:test_end]

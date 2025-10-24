@@ -25,7 +25,7 @@ import numpy as np
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from qpo.optimizers.quantum import IndependentClustersOptimizer, QuantumOptimizerWrapper
+from qpo.optimizers.discrete_levels import DiscreteLevelsOptimizer, DiscreteLevelsOptimizerWrapper
 from clustering import CorrelationClusterer
 
 print("="*80)
@@ -51,7 +51,7 @@ print(f"   ✓ Created {n_assets} assets, {n_days} days")
 # Create optimizer
 print("\n2. Creating quantum optimizer...")
 clusterer = CorrelationClusterer(max_cluster_size=10, target_cluster_size=5)
-quantum_opt = IndependentClustersOptimizer(
+quantum_opt = DiscreteLevelsOptimizer(
     max_cluster_size=10,
     n_bits=10,
     solver_type='simulated',
@@ -79,7 +79,7 @@ print(f"   ✓ Solver-only: {result2.get('solver_only_runtime', 'N/A'):.4f}s")
 
 # Test wrapper
 print("\n5. Testing wrapper (auto dict format)...")
-wrapper = QuantumOptimizerWrapper(quantum_opt)
+wrapper = DiscreteLevelsOptimizerWrapper(quantum_opt)
 result3 = wrapper.optimize(returns)
 print(f"   ✓ Type: {type(result3).__name__}")
 print(f"   ✓ Keys: {list(result3.keys())}")

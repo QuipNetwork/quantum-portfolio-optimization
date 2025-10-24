@@ -118,6 +118,11 @@ class GraphClusterer(BaseClusterer):
         # Convert to cluster dictionary and enforce size constraints
         clusters = self._communities_to_clusters(communities)
 
+        # Apply split-and-sweep to fit topology constraints (if specified)
+        # This is enabled by default to ensure topology compatibility
+        if self.max_clusters is not None:
+            clusters = self._split_and_sweep(clusters, self.max_clusters)
+
         return clusters
 
     def _louvain_communities(self, G):

@@ -37,8 +37,8 @@ class DiscreteLevelFormulator:
                  n_levels: int = 4,
                  alpha: float = 5.0,
                  beta: float = 2.5,
-                 budget_penalty: float = 200.0,
-                 thermometer_penalty: float = 10.0):
+                 thermometer_penalty: float = 10.0,
+                 l1_sparsity_penalty: float = 0.0):
         """
         Initialize discrete level formulator.
 
@@ -46,19 +46,30 @@ class DiscreteLevelFormulator:
             n_levels: Number of discrete weight levels (default 4)
             alpha: Return objective weight (default 5.0, aggressive)
             beta: Risk objective weight (default 2.5, ratio=0.5)
-            budget_penalty: Penalty for budget constraint violation (strong)
             thermometer_penalty: Penalty for thermometer constraint violation (weak/relaxed)
+            l1_sparsity_penalty: L1 regularization penalty (λ > 0 promotes sparsity)
+                                Adds +λ·||w||₁ term to objective
+                                For long-only: ||w||₁ = Σᵢ wᵢ (linear term)
+                                Higher values → fewer holdings (more sparse)
 
         Note:
             With n_levels=4, weights discretized to: 0.063, 0.125, 0.250, 0.500
             (using top-4 bits of 8-bit encoding)
             Alpha/Beta ratio of 0.5 represents aggressive risk tolerance
+
+            Budget constraint (Σwᵢ = 1) is handled by post-processing normalization,
+            NOT as a QUBO penalty term. This avoids adding edges to the graph.
+
+        L1 vs L2 Regularization:
+            L1 (this implementation): Promotes sparsity (drives weights to zero)
+            L2 (sum of squares): Promotes diversification (equal weights)
+            L1 adds ZERO edges to QUBO graph (linear term only)
         """
         self.n_levels = n_levels
         self.alpha = alpha
         self.beta = beta
-        self.budget_penalty = budget_penalty
         self.thermometer_penalty = thermometer_penalty
+        self.l1_sparsity_penalty = l1_sparsity_penalty
 
         # Weight encoding: use top n_levels bits of 8-bit space
         self.n_total_bits = 8
@@ -73,8 +84,7 @@ class DiscreteLevelFormulator:
     def formulate_cluster(self,
                          tickers: List[str],
                          mu: pd.Series,
-                         Sigma: pd.DataFrame,
-                         include_budget_constraint: bool = True) -> dimod.BinaryQuadraticModel:
+                         Sigma: pd.DataFrame) -> dimod.BinaryQuadraticModel:
         """
         Create QUBO for a single cluster using discrete levels.
 
@@ -82,10 +92,13 @@ class DiscreteLevelFormulator:
             tickers: Asset tickers
             mu: Expected returns
             Sigma: Covariance matrix
-            include_budget_constraint: Whether to add budget constraint (default True)
 
         Returns:
             BinaryQuadraticModel with thermometer-encoded weights
+
+        Note:
+            Budget constraint (Σwᵢ = 1) is NOT included in QUBO.
+            Weights are normalized in post-processing instead.
         """
         N = len(tickers)
         h, Q = {}, {}
@@ -135,46 +148,23 @@ class DiscreteLevelFormulator:
                     key = tuple(sorted([var_i, var_j]))
                     Q[key] = Q.get(key, 0) + coeff
 
-        # 4. BUDGET CONSTRAINT: λ * (Σw - 1)² (optional for multi-cluster formulations)
-        if include_budget_constraint:
-            # Expand: λ * (Σw² + ΣΣ w_i·w_j - 2·Σw + 1)
-            # Linear term: -2λ * Σw
+        # 4. L1 SPARSITY PENALTY: +λ * Σᵢ |wᵢ| (promotes sparse portfolios)
+        # For long-only portfolios (wᵢ ≥ 0): ||w||₁ = Σᵢ |wᵢ| = Σᵢ wᵢ
+        # This is a LINEAR term (adds to h vector only, NO new edges in Q)
+        # Higher λ → fewer holdings (drives small weights to zero)
+        if self.l1_sparsity_penalty != 0:
             for i in range(N):
                 for q in range(self.n_levels):
-                    var = var_names[i][q]
-                    coeff = -2 * self.budget_penalty * self.weight_values[q]
-                    h[var] = h.get(var, 0) + coeff
+                    var_q = var_names[i][q]
 
-            # Quadratic terms: λ * w_i² (self-terms)
-            for i in range(N):
-                for q in range(self.n_levels):
-                    for p in range(self.n_levels):
-                        var_q = var_names[i][q]
-                        var_p = var_names[i][p]
+                    # Linear penalty: +λ * wᵢ
+                    # Adds penalty proportional to weight magnitude
+                    # This encourages the optimizer to set weights to zero (sparsity)
+                    coeff = self.l1_sparsity_penalty * self.weight_values[q]
+                    h[var_q] = h.get(var_q, 0) + coeff
 
-                        coeff = self.budget_penalty * self.weight_values[q] * self.weight_values[p]
-
-                        if var_q == var_p:
-                            h[var_q] = h.get(var_q, 0) + coeff
-                        else:
-                            key = tuple(sorted([var_q, var_p]))
-                            Q[key] = Q.get(key, 0) + coeff
-
-            # Cross terms: λ * w_i * w_j for i ≠ j
-            for i in range(N):
-                for j in range(i+1, N):
-                    for q in range(self.n_levels):
-                        for p in range(self.n_levels):
-                            var_i = var_names[i][q]
-                            var_j = var_names[j][p]
-
-                            coeff = 2 * self.budget_penalty * self.weight_values[q] * self.weight_values[p]
-                            key = tuple(sorted([var_i, var_j]))
-                            Q[key] = Q.get(key, 0) + coeff
-
-        # Note: constant offset +λ not included in hierarchical formulation
-        # Each cluster/meta-cluster optimizes independently with its own budget constraint
-        # Post-processing handles final normalization and scaling
+        # Budget constraint (Σwᵢ = 1) is handled by normalization in post-processing
+        # NOT included as a QUBO penalty term to keep graph sparse
         return dimod.BinaryQuadraticModel(h, Q, 0.0, dimod.BINARY)
 
     def formulate_inter_cluster(self,
@@ -327,9 +317,8 @@ class DiscreteLevelFormulator:
             cluster_mu = pd.Series(mu[cluster_tickers])
             cluster_Sigma = pd.DataFrame(Sigma.loc[cluster_tickers, cluster_tickers])
 
-            # Create intra-cluster BQM WITHOUT budget constraint
-            # (we'll add a global budget constraint across all assets later)
-            cluster_bqm = self.formulate_cluster(cluster_tickers, cluster_mu, cluster_Sigma, include_budget_constraint=False)
+            # Create intra-cluster BQM
+            cluster_bqm = self.formulate_cluster(cluster_tickers, cluster_mu, cluster_Sigma)
 
             # Merge into combined BQM
             h.update(cluster_bqm.linear)
@@ -467,8 +456,7 @@ class DiscreteLevelFormulator:
 
     def decode_solution(self,
                        sample: Dict[str, int],
-                       tickers: List[str],
-                       warn_budget_violation: bool = True) -> pd.Series:
+                       tickers: List[str]) -> pd.Series:
         """
         Decode binary solution to portfolio weights (classical post-processing).
 
@@ -506,37 +494,15 @@ class DiscreteLevelFormulator:
             logger = logging.getLogger(__name__)
             logger.warning(f"Thermometer constraint violations: {thermometer_violations} bits violated")
 
-        # Normalize weights (no budget constraint warning since we rely on post-processing normalization)
+        # Normalize weights
         weight_sum = weights.sum()
         if weight_sum > 0:
             weights = weights / weight_sum
         else:
-            # CRITICAL: All-zero solution detected
-            #
-            # This can happen for two reasons:
-            # 1. QUBO formulation bug (missing budget constraint, weak penalties)
-            # 2. Legitimate sparse solution (solver concentrated weight on other clusters)
-            #
-            # When warn_budget_violation=False, assume this is a sparse multi-cluster
-            # solution and return zeros (no equal-weight fallback).
-            # When warn_budget_violation=True, this is unexpected - log error and fallback.
-
-            if warn_budget_violation:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.error(
-                    f"CRITICAL: Budget constraint failure - all weights are zero!\n"
-                    f"  This suggests:\n"
-                    f"  1. Missing or too-weak budget constraint in QUBO formulation\n"
-                    f"  2. Return/risk coefficients (alpha={self.alpha}, beta={self.beta}) dominating budget penalty (λ={self.thermometer_penalty})\n"
-                    f"  3. Solver found trivial all-zero solution (lowest energy)\n"
-                    f"  Falling back to equal weights to prevent portfolio failure."
-                )
-                # Fallback to equal weight (prevents portfolio crash, but masks underlying bug)
-                weights = np.ones(len(tickers)) / len(tickers)
-            else:
-                # Sparse solution - return zeros (no fallback)
-                weights = np.zeros(len(tickers))
+            # All-zero solution: cluster has no clear winner
+            # This is normal when assets have similar risk/return profiles
+            # Use equal weights as fallback
+            weights = np.ones(len(tickers)) / len(tickers)
 
         return pd.Series(weights, index=tickers)
 

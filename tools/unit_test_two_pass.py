@@ -27,7 +27,7 @@ sys.path.insert(0, str(project_root))
 
 import pandas as pd
 import numpy as np
-from qpo.optimizers.quantum import IndependentClustersOptimizer
+from qpo.optimizers.discrete_levels import DiscreteLevelsOptimizer
 from clustering import CorrelationClusterer
 
 print("="*60)
@@ -56,7 +56,7 @@ print("-"*60)
 print("Test 1: Single-Pass Optimization (Original)")
 print("-"*60)
 
-optimizer_single = IndependentClustersOptimizer(
+optimizer_single = DiscreteLevelsOptimizer(
     max_cluster_size=18,
     n_bits=10,
     alpha=1.0,
@@ -95,7 +95,7 @@ print("-"*60)
 print("Test 2: Two-Pass Optimization (Hierarchical)")
 print("-"*60)
 
-optimizer_twopass = IndependentClustersOptimizer(
+optimizer_twopass = DiscreteLevelsOptimizer(
     max_cluster_size=18,
     n_bits=10,
     alpha=1.0,

@@ -15,16 +15,16 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Tests for quantum portfolio optimizer."""
+"""Tests for discrete levels portfolio optimizer."""
 
 import pytest
 import numpy as np
 import pandas as pd
-from qpo.optimizers.quantum import IndependentClustersOptimizer, QuantumOptimizationResult
+from qpo.optimizers.discrete_levels import DiscreteLevelsOptimizer
 
 
-class TestIndependentClustersOptimizer:
-    """Test suite for IndependentClustersOptimizer."""
+class TestDiscreteLevelsOptimizer:
+    """Test suite for DiscreteLevelsOptimizer."""
 
     @pytest.fixture
     def sample_returns(self):
@@ -58,128 +58,129 @@ class TestIndependentClustersOptimizer:
 
     def test_initialization_default(self):
         """Test optimizer initialization with default parameters."""
-        optimizer = IndependentClustersOptimizer()
+        optimizer = DiscreteLevelsOptimizer()
 
-        assert optimizer.max_cluster_size == 18
-        assert optimizer.n_bits == 10
-        assert optimizer.alpha == 1.0
-        assert optimizer.beta == 1.0
-        assert optimizer.lambda_budget == 10.0
+        assert optimizer.max_cluster_size == 19
+        assert optimizer.n_levels == 6
+        assert optimizer.alpha == 10.0
+        assert optimizer.beta == 2.0
+        assert optimizer.budget_penalty == 0.0
+        assert optimizer.thermometer_penalty == 10.0
         assert optimizer.solver_type == 'simulated'
-        assert optimizer.num_reads == 1000
-        assert optimizer.aggregation_strategy == 'concatenate'
-        assert optimizer.cardinality is None
+        assert optimizer.num_reads == 256
 
     def test_initialization_custom(self):
         """Test optimizer initialization with custom parameters."""
-        optimizer = IndependentClustersOptimizer(
+        optimizer = DiscreteLevelsOptimizer(
             max_cluster_size=10,
-            n_bits=8,
+            n_levels=4,
             alpha=2.0,
             beta=0.5,
-            solver_type='hybrid',
-            aggregation_strategy='proportional',
-            cardinality=15
+            solver_type='simulated',
+            num_reads=100
         )
 
         assert optimizer.max_cluster_size == 10
-        assert optimizer.n_bits == 8
+        assert optimizer.n_levels == 4
         assert optimizer.alpha == 2.0
         assert optimizer.beta == 0.5
-        assert optimizer.solver_type == 'hybrid'
-        assert optimizer.aggregation_strategy == 'proportional'
-        assert optimizer.cardinality == 15
+        assert optimizer.solver_type == 'simulated'
+        assert optimizer.num_reads == 100
 
     def test_optimize_basic(self, small_returns):
         """Test basic optimization workflow."""
-        optimizer = IndependentClustersOptimizer(
+        optimizer = DiscreteLevelsOptimizer(
             solver_type='simulated',
             num_reads=100  # Reduce for speed
         )
 
         result = optimizer.optimize(small_returns)
 
-        assert isinstance(result, QuantumOptimizationResult)
-        assert result.success
-        assert len(result.weights) == len(small_returns.columns)
-        assert np.isclose(result.weights.sum(), 1.0, atol=0.01)
-        assert all(result.weights >= 0)
-        assert result.runtime > 0
+        assert isinstance(result, dict)
+        assert 'weights' in result
+        assert 'metrics' in result
+        assert len(result['weights']) == len(small_returns.columns)
+        assert np.isclose(result['weights'].sum(), 1.0, atol=0.01)
+        assert all(result['weights'] >= 0)
+        assert result['metrics']['runtime'] > 0
 
     def test_optimize_result_structure(self, small_returns):
         """Test that result contains all expected fields."""
-        optimizer = IndependentClustersOptimizer(solver_type='simulated', num_reads=50)
+        optimizer = DiscreteLevelsOptimizer(solver_type='simulated', num_reads=50)
         result = optimizer.optimize(small_returns)
 
-        assert hasattr(result, 'weights')
-        assert hasattr(result, 'expected_return')
-        assert hasattr(result, 'volatility')
-        assert hasattr(result, 'sharpe_ratio')
-        assert hasattr(result, 'n_clusters')
-        assert hasattr(result, 'cluster_stats')
-        assert hasattr(result, 'runtime')
-        assert hasattr(result, 'solver_info')
-        assert hasattr(result, 'success')
-        assert hasattr(result, 'message')
+        assert 'weights' in result
+        assert 'metrics' in result
+        metrics = result['metrics']
+        assert 'return' in metrics
+        assert 'risk' in metrics
+        assert 'sharpe' in metrics
+        assert 'n_clusters' in metrics
+        assert 'runtime' in metrics
 
     def test_optimize_metrics(self, small_returns):
         """Test that portfolio metrics are calculated correctly."""
-        optimizer = IndependentClustersOptimizer(solver_type='simulated', num_reads=50)
+        optimizer = DiscreteLevelsOptimizer(solver_type='simulated', num_reads=50)
         result = optimizer.optimize(small_returns)
 
-        assert result.expected_return is not None
-        assert result.volatility > 0
-        assert result.sharpe_ratio is not None
+        metrics = result['metrics']
+        weights = result['weights']
+
+        assert metrics['return'] is not None
+        assert metrics['risk'] > 0
+        assert metrics['sharpe'] is not None
 
         # Manually verify metrics
         mu = small_returns.mean() * 252
         Sigma = small_returns.cov() * 252
 
-        expected_return = (result.weights * mu).sum()
-        volatility = np.sqrt(result.weights @ Sigma @ result.weights)
+        expected_return = (weights * mu).sum()
+        volatility = np.sqrt(weights @ Sigma @ weights)
 
-        assert np.isclose(result.expected_return, expected_return, rtol=0.01)
-        assert np.isclose(result.volatility, volatility, rtol=0.01)
+        assert np.isclose(metrics['return'], expected_return, rtol=0.01)
+        assert np.isclose(metrics['risk'], volatility, rtol=0.01)
 
-    def test_optimize_with_cardinality(self, small_returns):
-        """Test optimization with cardinality constraint."""
-        optimizer = IndependentClustersOptimizer(
+    def test_optimize_with_k_spread(self, small_returns):
+        """Test optimization with k_spread parameter for concentration."""
+        optimizer = DiscreteLevelsOptimizer(
             solver_type='simulated',
             num_reads=50,
-            cardinality=2  # Limit to 2 assets
+            k_spread=1.0  # Apply spread adjustment
         )
 
         result = optimizer.optimize(small_returns)
 
-        assert result.success
-        assert (result.weights > 0).sum() <= 2
-        assert np.isclose(result.weights.sum(), 1.0, atol=0.01)
+        assert 'weights' in result
+        assert np.isclose(result['weights'].sum(), 1.0, atol=0.01)
 
-    def test_optimize_different_strategies(self, small_returns):
-        """Test different aggregation strategies."""
-        strategies = ['concatenate', 'proportional', 'uniform']
+    def test_optimize_different_parameters(self, small_returns):
+        """Test optimization with different parameter combinations."""
+        param_sets = [
+            {'alpha': 5.0, 'beta': 1.0},
+            {'alpha': 1.0, 'beta': 5.0},
+            {'n_levels': 4}
+        ]
         results = {}
 
-        for strategy in strategies:
-            optimizer = IndependentClustersOptimizer(
+        for i, params in enumerate(param_sets):
+            optimizer = DiscreteLevelsOptimizer(
                 solver_type='simulated',
                 num_reads=50,
-                aggregation_strategy=strategy
+                **params
             )
             result = optimizer.optimize(small_returns)
-            results[strategy] = result
+            results[i] = result
 
-            assert result.success
-            assert np.isclose(result.weights.sum(), 1.0, atol=0.01)
+            assert 'weights' in result
+            assert np.isclose(result['weights'].sum(), 1.0, atol=0.01)
 
-        # Results should differ across strategies (not always, but likely)
-        # At minimum, all should be valid
-        for strategy, result in results.items():
-            assert len(result.weights) == len(small_returns.columns)
+        # All should produce valid portfolios
+        for i, result in results.items():
+            assert len(result['weights']) == len(small_returns.columns)
 
     def test_cluster_statistics(self, small_returns):
         """Test cluster statistics in result."""
-        optimizer = IndependentClustersOptimizer(
+        optimizer = DiscreteLevelsOptimizer(
             max_cluster_size=2,  # Force multiple clusters
             solver_type='simulated',
             num_reads=50
@@ -187,63 +188,57 @@ class TestIndependentClustersOptimizer:
 
         result = optimizer.optimize(small_returns)
 
-        assert result.n_clusters > 0
-        assert 'n_clusters' in result.cluster_stats
-        assert 'total_assets' in result.cluster_stats
-        assert result.cluster_stats['total_assets'] == len(small_returns.columns)
+        metrics = result['metrics']
+        assert metrics['n_clusters'] > 0
 
-    def test_solver_info(self, small_returns):
-        """Test solver info in result."""
-        optimizer = IndependentClustersOptimizer(solver_type='simulated', num_reads=50)
+    def test_solver_runtime(self, small_returns):
+        """Test solver runtime tracking."""
+        optimizer = DiscreteLevelsOptimizer(solver_type='simulated', num_reads=50)
         result = optimizer.optimize(small_returns)
 
-        assert 'solver_type' in result.solver_info
-        assert result.solver_info['solver_type'] == 'simulated'
-        assert 'n_clusters_solved' in result.solver_info
-        assert result.solver_info['n_clusters_solved'] == result.n_clusters
+        metrics = result['metrics']
+        assert 'runtime' in metrics
+        assert metrics['runtime'] > 0
 
-    def test_get_config(self):
-        """Test config retrieval."""
-        optimizer = IndependentClustersOptimizer(
+    def test_optimizer_attributes(self):
+        """Test optimizer attribute access."""
+        optimizer = DiscreteLevelsOptimizer(
             max_cluster_size=15,
-            n_bits=8,
+            n_levels=4,
             alpha=2.0
         )
 
-        config = optimizer.get_config()
-
-        assert config['max_cluster_size'] == 15
-        assert config['n_bits'] == 8
-        assert config['alpha'] == 2.0
-        assert 'clusterer_type' in config
+        assert optimizer.max_cluster_size == 15
+        assert optimizer.n_levels == 4
+        assert optimizer.alpha == 2.0
 
     def test_aggressive_parameters(self, small_returns):
         """Test with aggressive parameters (high alpha, low beta)."""
-        optimizer = IndependentClustersOptimizer(
+        optimizer = DiscreteLevelsOptimizer(
             solver_type='simulated',
             num_reads=50,
-            alpha=5.0,  # High return weight
-            beta=0.1    # Low risk weight
+            alpha=20.0,  # High return weight
+            beta=0.5     # Low risk weight
         )
 
         result = optimizer.optimize(small_returns)
-        assert result.success
+        assert 'weights' in result
 
     def test_conservative_parameters(self, small_returns):
         """Test with conservative parameters (low alpha, high beta)."""
-        optimizer = IndependentClustersOptimizer(
+        optimizer = DiscreteLevelsOptimizer(
             solver_type='simulated',
             num_reads=50,
-            alpha=0.1,  # Low return weight
-            beta=5.0    # High risk weight
+            alpha=1.0,   # Low return weight
+            beta=10.0    # High risk weight
         )
 
         result = optimizer.optimize(small_returns)
-        assert result.success
+        assert 'weights' in result
 
     def test_small_cluster_size(self, small_returns):
         """Test with very small cluster size to force many clusters."""
-        optimizer = IndependentClustersOptimizer(
+        optimizer = DiscreteLevelsOptimizer(
             max_cluster_size=2,
             solver_type='simulated',
             num_reads=50
@@ -251,13 +246,13 @@ class TestIndependentClustersOptimizer:
 
         result = optimizer.optimize(small_returns)
 
-        assert result.success
+        assert 'weights' in result
         # 4 assets with max_size=2 should create 2 clusters
-        assert result.n_clusters == 2
+        assert result['metrics']['n_clusters'] == 2
 
     def test_large_cluster_size(self, small_returns):
         """Test with large cluster size (single cluster)."""
-        optimizer = IndependentClustersOptimizer(
+        optimizer = DiscreteLevelsOptimizer(
             max_cluster_size=100,  # Larger than dataset
             solver_type='simulated',
             num_reads=50
@@ -265,21 +260,21 @@ class TestIndependentClustersOptimizer:
 
         result = optimizer.optimize(small_returns)
 
-        assert result.success
+        assert 'weights' in result
         # All assets should fit in one cluster
-        assert result.n_clusters == 1
+        assert result['metrics']['n_clusters'] == 1
 
-    def test_different_n_bits(self, small_returns):
+    def test_different_n_levels(self, small_returns):
         """Test with different discretization levels."""
-        for n_bits in [4, 8, 10]:
-            optimizer = IndependentClustersOptimizer(
-                n_bits=n_bits,
+        for n_levels in [3, 4, 6]:
+            optimizer = DiscreteLevelsOptimizer(
+                n_levels=n_levels,
                 solver_type='simulated',
                 num_reads=50
             )
 
             result = optimizer.optimize(small_returns)
-            assert result.success
+            assert 'weights' in result
 
     def test_zero_variance_asset(self):
         """Test handling of asset with zero variance."""
@@ -289,11 +284,11 @@ class TestIndependentClustersOptimizer:
             'MSFT': np.random.randn(50) * 0.02
         })
 
-        optimizer = IndependentClustersOptimizer(solver_type='simulated', num_reads=50)
+        optimizer = DiscreteLevelsOptimizer(solver_type='simulated', num_reads=50)
         result = optimizer.optimize(returns)
 
-        # Should handle gracefully (may or may not include CONST)
-        assert result.success or not result.success  # Either is acceptable
+        # Should handle gracefully
+        assert 'weights' in result or 'error' in result  # Either is acceptable
 
     def test_negative_returns(self):
         """Test with predominantly negative returns."""
@@ -304,11 +299,11 @@ class TestIndependentClustersOptimizer:
             'STOCK3': -np.abs(np.random.randn(50) * 0.02)
         })
 
-        optimizer = IndependentClustersOptimizer(solver_type='simulated', num_reads=50)
+        optimizer = DiscreteLevelsOptimizer(solver_type='simulated', num_reads=50)
         result = optimizer.optimize(returns)
 
         # Should complete even with negative returns
-        assert result.success
+        assert 'weights' in result
 
     def test_minimal_dataset(self):
         """Test with minimal dataset (2 assets, short history)."""
@@ -317,10 +312,10 @@ class TestIndependentClustersOptimizer:
             'MSFT': [-0.01, 0.02, -0.01, 0.01, -0.005]
         })
 
-        optimizer = IndependentClustersOptimizer(solver_type='simulated', num_reads=20)
+        optimizer = DiscreteLevelsOptimizer(solver_type='simulated', num_reads=20)
         result = optimizer.optimize(returns)
 
-        assert isinstance(result, QuantumOptimizationResult)
+        assert isinstance(result, dict)
         # May succeed or fail, but should not crash
 
     def test_highly_correlated_assets(self):
@@ -334,12 +329,12 @@ class TestIndependentClustersOptimizer:
             'GOOGL': base + np.random.randn(50) * 0.001
         })
 
-        optimizer = IndependentClustersOptimizer(solver_type='simulated', num_reads=50)
+        optimizer = DiscreteLevelsOptimizer(solver_type='simulated', num_reads=50)
         result = optimizer.optimize(returns)
 
-        assert result.success
+        assert 'weights' in result
         # Should cluster all together
-        assert result.n_clusters == 1
+        assert result['metrics']['n_clusters'] == 1
 
     def test_uncorrelated_assets(self):
         """Test with completely uncorrelated assets."""
@@ -351,26 +346,26 @@ class TestIndependentClustersOptimizer:
             'AMZN': np.random.randn(50) * 0.02
         })
 
-        optimizer = IndependentClustersOptimizer(
+        optimizer = DiscreteLevelsOptimizer(
             max_cluster_size=2,
             solver_type='simulated',
             num_reads=50
         )
         result = optimizer.optimize(returns)
 
-        assert result.success
+        assert 'weights' in result
 
-    @pytest.mark.parametrize("aggregation_strategy", ['concatenate', 'proportional', 'uniform'])
-    def test_all_strategies_valid(self, small_returns, aggregation_strategy):
-        """Test that all aggregation strategies produce valid portfolios."""
-        optimizer = IndependentClustersOptimizer(
+    @pytest.mark.parametrize("n_levels", [3, 4, 6])
+    def test_all_level_counts_valid(self, small_returns, n_levels):
+        """Test that all discretization levels produce valid portfolios."""
+        optimizer = DiscreteLevelsOptimizer(
             solver_type='simulated',
             num_reads=50,
-            aggregation_strategy=aggregation_strategy
+            n_levels=n_levels
         )
 
         result = optimizer.optimize(small_returns)
 
-        assert result.success
-        assert np.isclose(result.weights.sum(), 1.0, atol=0.01)
-        assert all(result.weights >= 0)
+        assert 'weights' in result
+        assert np.isclose(result['weights'].sum(), 1.0, atol=0.01)
+        assert all(result['weights'] >= 0)

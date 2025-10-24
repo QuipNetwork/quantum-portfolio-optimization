@@ -35,7 +35,9 @@ class ReturnsClusterer(BaseClusterer):
                  max_cluster_size: int = 18,
                  n_bits: int = 10,
                  linkage_method: str = 'ward',
-                 target_cluster_size: int = None):
+                 target_cluster_size: int = None,
+                 max_clusters: int = None,
+                 min_cluster_size: int = None):
         """
         Initialize returns-based clusterer.
 
@@ -43,8 +45,14 @@ class ReturnsClusterer(BaseClusterer):
             max_cluster_size: Maximum assets per cluster
             n_bits: Bits per weight variable
             linkage_method: 'ward', 'single', 'complete', or 'average'
+            target_cluster_size: Target average cluster size
+            max_clusters: Maximum number of clusters
+            min_cluster_size: Minimum assets per cluster
         """
-        super().__init__(max_cluster_size, n_bits, linkage_method, target_cluster_size=target_cluster_size)
+        super().__init__(max_cluster_size, n_bits, linkage_method,
+                        target_cluster_size=target_cluster_size,
+                        max_clusters=max_clusters,
+                        min_cluster_size=min_cluster_size)
 
     def compute_distance_matrix(self, returns: pd.DataFrame) -> np.ndarray:
         """

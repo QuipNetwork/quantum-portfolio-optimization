@@ -145,7 +145,7 @@ def create_dummy_portfolio_bqm(
         # NOTE: include_budget_constraint=False to match runtime optimizer
         # Budget constraints create dense O(N²×L²) couplings that are hard to embed.
         # Post-processing normalizes weights, so budget constraints aren't needed.
-        bqm = formulator.formulate_cluster(cluster_tickers, mu, Sigma, include_budget_constraint=False)
+        bqm = formulator.formulate_cluster(cluster_tickers, mu, Sigma)
 
         # Manually merge linear terms
         for var, coeff in bqm.linear.items():
@@ -170,7 +170,7 @@ def create_dummy_portfolio_bqm(
         columns=meta_tickers
     )
 
-    meta_bqm = formulator.formulate_cluster(meta_tickers, meta_mu, meta_Sigma, include_budget_constraint=False)
+    meta_bqm = formulator.formulate_cluster(meta_tickers, meta_mu, meta_Sigma)
 
     # Manually merge meta-cluster
     for var, coeff in meta_bqm.linear.items():

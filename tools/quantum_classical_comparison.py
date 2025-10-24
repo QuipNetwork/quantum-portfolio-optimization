@@ -32,7 +32,6 @@ sys.path.insert(0, str(project_root))
 # Load environment variables from .env
 load_dotenv(project_root / '.env')
 
-from qpo.optimizers.quantum import IndependentClustersOptimizer, QuantumOptimizerWrapper
 from qpo.optimizers.discrete_levels import DiscreteLevelsOptimizer
 from qpo.optimizers.classical import ClassicalOptimizer
 from qpo.optimizers.equal_weight import EqualWeightOptimizer
@@ -206,7 +205,8 @@ def create_optimizers(
     min_cluster_size: int = 2,
     portfolio_info_csv: str = None,
     optimizer_filter: List[str] = None,
-    returns: pd.DataFrame = None
+    returns: pd.DataFrame = None,
+    k_spread: float = 0.0
 ) -> Dict[str, Any]:
     """
     Create all optimizer instances for comparison.
@@ -219,6 +219,8 @@ def create_optimizers(
         target_cluster_size: Target average cluster size
         portfolio_info_csv: Path to portfolio info CSV for sector clustering
         optimizer_filter: List of optimizer types to include (None = all)
+        returns: Returns DataFrame for template detection
+        k_spread: Concentration parameter for weight spreading (0.0-3.0)
 
     Returns:
         Dictionary of {optimizer_name: optimizer_instance}
@@ -273,19 +275,21 @@ def create_optimizers(
                 try:
                     clusterer = create_clusterer(clustering_method)
 
-                    # Use IndependentClustersOptimizer for all solver types
-                    # QPU will use LazyFixedEmbedding or FixedEmbedding cache (no pre-computed templates required)
-                    quantum_opt = IndependentClustersOptimizer(
-                        max_cluster_size=max_cluster_size,
+                    # Use DiscreteLevelsOptimizer with k_spread parameter
+                    quantum_opt = DiscreteLevelsOptimizer(
+                        n_levels=6,
+                        alpha=10,
+                        beta=2,
                         solver_type=solver_type,
-                        clusterer=clusterer
-                        # Use default parameters optimized for MV baseline matching:
-                        # alpha=1.5, beta=0.8, lambda_budget=5.0, num_reads=2000, use_two_pass=True
+                        clusterer=clusterer,
+                        max_cluster_size=max_cluster_size,
+                        l1_sparsity_penalty=6.0,
+                        use_thermometer_cutoff=True
                     )
-                    wrapped = QuantumOptimizerWrapper(quantum_opt)
+
                     name = f"Quantum ({solver_type.upper()}, {clustering_method.capitalize()})"
 
-                    optimizers[name] = wrapped
+                    optimizers[name] = quantum_opt
                     print(f"  ✓ {name}")
                 except Exception as e:
                     print(f"  ✗ Failed to create {solver_type}/{clustering_method}: {e}")
@@ -460,6 +464,8 @@ def main():
                        choices=['quantum', 'mean-variance', 'l1', 'l2', 'risk-parity', 'equal-weight'],
                        default=None,
                        help='Specific optimizers to run (default: all). Use to isolate and test individual optimizers.')
+    parser.add_argument('--k-spread', type=float, default=0.0,
+                       help='Concentration parameter for weight spreading (0.0=no spread, 1.0-3.0=moderate spread, default: 0.0)')
 
     args = parser.parse_args()
 
@@ -490,7 +496,8 @@ def main():
         min_cluster_size=args.min_cluster_size,
         portfolio_info_csv=args.portfolio_info_csv,
         optimizer_filter=args.optimizers,
-        returns=returns  # Pass returns for QPU template auto-detection
+        returns=returns,  # Pass returns for QPU template auto-detection
+        k_spread=args.k_spread
     )
 
     # Run comparison

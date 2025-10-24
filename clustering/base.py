@@ -213,21 +213,8 @@ class BaseClusterer(ABC):
 
         cluster_ids, final_n_clusters, final_counts = best_result
 
-        # Check if constraints are satisfied
-        if np.any(final_counts > self.max_cluster_size):
-            violating = final_counts[final_counts > self.max_cluster_size]
-            raise ValueError(
-                f"Cannot satisfy max_cluster_size={self.max_cluster_size}. "
-                f"{len(violating)} clusters exceed limit (sizes: {violating.tolist()}). "
-                f"This violates quantum hardware constraints."
-            )
-
-        if self.max_clusters and final_n_clusters > self.max_clusters:
-            raise ValueError(
-                f"Cannot satisfy max_clusters={self.max_clusters}. "
-                f"Created {final_n_clusters} clusters. "
-                f"Consider increasing max_cluster_size to allow fewer, larger clusters."
-            )
+        # Don't check max_cluster_size constraint here - split-and-sweep will handle it
+        # Don't check max_clusters constraint here - split-and-sweep will handle it
 
         # Build cluster dictionary
         clusters = {}
@@ -239,6 +226,20 @@ class BaseClusterer(ABC):
 
         # Merge small clusters
         clusters = self._merge_small_clusters(clusters, labels, Z)
+
+        # Apply split-and-sweep to fit topology constraints (if specified)
+        # This is enabled by default to ensure topology compatibility
+        # Split handles clusters that are too large, sweep handles too many clusters
+        has_large_clusters = any(len(tickers) > self.max_cluster_size for tickers in clusters.values())
+        if self.max_clusters is not None or has_large_clusters:
+            clusters = self._split_and_sweep(clusters, self.max_clusters)
+
+        # Final validation
+        final_sizes = [len(tickers) for tickers in clusters.values()]
+        if any(size > self.max_cluster_size for size in final_sizes):
+            raise ValueError(
+                f"Split-and-sweep failed: clusters still exceed max_cluster_size={self.max_cluster_size}"
+            )
 
         return clusters
 
@@ -316,6 +317,188 @@ class BaseClusterer(ABC):
                 pass
 
         return merged_clusters
+
+    def _sweep_clusters_to_topology(self,
+                                    clusters: Dict[str, List[str]],
+                                    target_num_clusters: int = None) -> Dict[str, List[str]]:
+        """
+        Sweep/merge clusters to fit topology constraints (enabled by default).
+
+        Algorithm:
+        1. Sort clusters by size (largest to smallest)
+        2. While we have too many clusters:
+           - Take the smallest cluster
+           - Try to merge it into the largest cluster that has room
+           - If no cluster has room, fail
+        3. Continue until we have target_num_clusters or fewer
+
+        Args:
+            clusters: Original cluster assignments
+            target_num_clusters: Target number of clusters (default: self.max_clusters)
+
+        Returns:
+            Swept cluster dictionary
+
+        Raises:
+            ValueError: If clusters cannot be swept to fit constraints
+        """
+        # Use max_clusters if no target specified
+        if target_num_clusters is None:
+            if self.max_clusters is None:
+                # No constraint - return as-is
+                return clusters
+            target_num_clusters = self.max_clusters
+
+        # Convert to list of (cluster_id, tickers)
+        cluster_list = [(cid, list(tickers)) for cid, tickers in clusters.items()]
+
+        # Check if any cluster exceeds max size
+        for cid, tickers in cluster_list:
+            if len(tickers) > self.max_cluster_size:
+                raise ValueError(
+                    f"Cluster {cid} too large: {len(tickers)} > {self.max_cluster_size}. "
+                    f"Cannot sweep - violates hardware constraint."
+                )
+
+        # If we already fit, return as-is
+        if len(cluster_list) <= target_num_clusters:
+            return clusters
+
+        # Perform sweep: merge smallest into largest
+        iteration = 0
+        max_iterations = len(cluster_list) * 2  # Safety limit
+
+        while len(cluster_list) > target_num_clusters and iteration < max_iterations:
+            iteration += 1
+
+            # Sort by size (largest first, smallest last)
+            cluster_list.sort(key=lambda x: len(x[1]), reverse=True)
+
+            # Take smallest cluster
+            smallest_id, smallest_tickers = cluster_list.pop()
+            smallest_size = len(smallest_tickers)
+
+            # Try to merge into largest cluster with room
+            merged = False
+            for i, (target_id, target_tickers) in enumerate(cluster_list):
+                if len(target_tickers) + smallest_size <= self.max_cluster_size:
+                    # Merge smallest into this cluster
+                    target_tickers.extend(smallest_tickers)
+                    merged = True
+                    break
+
+            if not merged:
+                # Couldn't fit anywhere - restoration and failure
+                cluster_list.append((smallest_id, smallest_tickers))
+                raise ValueError(
+                    f"Cannot sweep {len(cluster_list)} clusters into {target_num_clusters} "
+                    f"(max_cluster_size={self.max_cluster_size}). "
+                    f"Consider increasing max_cluster_size or target cluster count."
+                )
+
+        if iteration >= max_iterations:
+            raise ValueError("Sweep exceeded max iterations - unable to converge")
+
+        # Success! Rebuild cluster dictionary
+        swept_clusters = {cid: tickers for cid, tickers in cluster_list}
+        return swept_clusters
+
+    def _split_large_clusters(self,
+                             clusters: Dict[str, List[str]],
+                             distance_matrix: np.ndarray = None,
+                             labels: List[str] = None) -> Dict[str, List[str]]:
+        """
+        Split clusters that exceed max_cluster_size.
+
+        Algorithm:
+        1. Identify clusters that are too large
+        2. For each large cluster, split it using k-means or random split
+        3. Continue until all clusters fit within max_cluster_size
+
+        Args:
+            clusters: Original cluster assignments
+            distance_matrix: Optional distance matrix for smarter splitting
+            labels: Original asset labels (for distance matrix indexing)
+
+        Returns:
+            Clusters with no cluster exceeding max_cluster_size
+        """
+        split_clusters = {}
+        cluster_counter = 0
+
+        for cluster_id, tickers in clusters.items():
+            cluster_size = len(tickers)
+
+            if cluster_size <= self.max_cluster_size:
+                # Cluster is fine, keep as-is
+                split_clusters[f"cluster_{cluster_counter}"] = tickers
+                cluster_counter += 1
+            else:
+                # Cluster is too large - split it
+                # Calculate how many sub-clusters we need
+                num_splits = (cluster_size + self.max_cluster_size - 1) // self.max_cluster_size
+
+                # Simple split: divide roughly equally
+                # More sophisticated version could use k-means on the subset
+                split_size = cluster_size // num_splits
+                remainder = cluster_size % num_splits
+
+                start_idx = 0
+                for split_i in range(num_splits):
+                    # Distribute remainder across first few splits
+                    current_size = split_size + (1 if split_i < remainder else 0)
+                    end_idx = start_idx + current_size
+
+                    split_tickers = tickers[start_idx:end_idx]
+                    split_clusters[f"cluster_{cluster_counter}"] = split_tickers
+                    cluster_counter += 1
+
+                    start_idx = end_idx
+
+        return split_clusters
+
+    def _split_and_sweep(self,
+                        clusters: Dict[str, List[str]],
+                        target_num_clusters: int = None) -> Dict[str, List[str]]:
+        """
+        Combined split-and-sweep algorithm to fit topology constraints.
+
+        Algorithm:
+        1. First, SPLIT any clusters that exceed max_cluster_size
+        2. Then, SWEEP (merge) to reduce cluster count if needed
+
+        Args:
+            clusters: Original cluster assignments
+            target_num_clusters: Target number of clusters (default: self.max_clusters)
+
+        Returns:
+            Clusters that fit both max_cluster_size and max_clusters constraints
+
+        Raises:
+            ValueError: If constraints cannot be satisfied
+        """
+        # Use max_clusters if no target specified
+        if target_num_clusters is None:
+            if self.max_clusters is None:
+                # No constraint - just split if needed
+                return self._split_large_clusters(clusters)
+            target_num_clusters = self.max_clusters
+
+        # Step 1: Split large clusters
+        clusters = self._split_large_clusters(clusters)
+
+        # Step 2: Verify no cluster exceeds max size after split
+        for cid, tickers in clusters.items():
+            if len(tickers) > self.max_cluster_size:
+                raise ValueError(
+                    f"Cluster {cid} still too large after split: {len(tickers)} > {self.max_cluster_size}"
+                )
+
+        # Step 3: If we have too many clusters, sweep (merge small ones)
+        if len(clusters) > target_num_clusters:
+            clusters = self._sweep_clusters_to_topology(clusters, target_num_clusters)
+
+        return clusters
 
     def validate_degree_constraint(self,
                                    clusters: Dict[str, List[str]]) -> bool:

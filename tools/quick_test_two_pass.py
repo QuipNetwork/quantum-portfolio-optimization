@@ -26,7 +26,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 import pandas as pd
-from qpo.optimizers.quantum import IndependentClustersOptimizer, QuantumOptimizerWrapper
+from qpo.optimizers.discrete_levels import DiscreteLevelsOptimizer, DiscreteLevelsOptimizerWrapper
 from qpo.optimizers.backtest import Backtester
 from clustering import CorrelationClusterer
 
@@ -46,7 +46,7 @@ clusterer = CorrelationClusterer(
 print("="*60)
 print("TEST 1: Single-Pass Quantum (Original)")
 print("="*60)
-quantum_single = IndependentClustersOptimizer(
+quantum_single = DiscreteLevelsOptimizer(
     max_cluster_size=18,
     n_bits=10,
     alpha=1.0,
@@ -60,7 +60,7 @@ quantum_single = IndependentClustersOptimizer(
     use_two_pass=False  # Original approach
 )
 
-wrapper_single = QuantumOptimizerWrapper(quantum_single)
+wrapper_single = DiscreteLevelsOptimizerWrapper(quantum_single)
 
 backtester_single = Backtester(
     wrapper_single,
@@ -89,7 +89,7 @@ except Exception as e:
 print("="*60)
 print("TEST 2: Two-Pass Quantum (Hierarchical)")
 print("="*60)
-quantum_twopass = IndependentClustersOptimizer(
+quantum_twopass = DiscreteLevelsOptimizer(
     max_cluster_size=18,
     n_bits=10,
     alpha=1.0,
@@ -105,7 +105,7 @@ quantum_twopass = IndependentClustersOptimizer(
     inter_cluster_beta=1.0
 )
 
-wrapper_twopass = QuantumOptimizerWrapper(quantum_twopass)
+wrapper_twopass = DiscreteLevelsOptimizerWrapper(quantum_twopass)
 
 backtester_twopass = Backtester(
     wrapper_twopass,
