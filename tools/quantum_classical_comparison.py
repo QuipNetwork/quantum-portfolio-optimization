@@ -23,10 +23,14 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Any
+from dotenv import load_dotenv
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+
+# Load environment variables from .env
+load_dotenv(project_root / '.env')
 
 from qpo.optimizers.quantum import IndependentClustersOptimizer, QuantumOptimizerWrapper
 from qpo.optimizers.discrete_levels import DiscreteLevelsOptimizer

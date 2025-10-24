@@ -46,7 +46,6 @@ from dotenv import load_dotenv
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from qpo.qubo.discrete_levels import DiscreteLevelFormulator
-from qpo.qubo.formulation import QUBOFormulator
 
 load_dotenv()
 
@@ -119,7 +118,9 @@ def create_dummy_portfolio_bqm(
 
     np.random.seed(42)  # Reproducible dummy data
 
-    combined_bqm = None
+    # Build combined BQM using manual dict merging (avoid .update() bugs)
+    h_combined = {}
+    Q_combined = {}
     asset_variables = []
 
     # Create asset clusters
@@ -141,12 +142,18 @@ def create_dummy_portfolio_bqm(
             columns=cluster_tickers
         )
 
-        bqm = formulator.formulate_cluster(cluster_tickers, mu, Sigma)
+        # NOTE: include_budget_constraint=False to match runtime optimizer
+        # Budget constraints create dense O(N²×L²) couplings that are hard to embed.
+        # Post-processing normalizes weights, so budget constraints aren't needed.
+        bqm = formulator.formulate_cluster(cluster_tickers, mu, Sigma, include_budget_constraint=False)
 
-        if combined_bqm is None:
-            combined_bqm = bqm
-        else:
-            combined_bqm.update(bqm)
+        # Manually merge linear terms
+        for var, coeff in bqm.linear.items():
+            h_combined[var] = h_combined.get(var, 0.0) + coeff
+
+        # Manually merge quadratic terms
+        for edge, coeff in bqm.quadratic.items():
+            Q_combined[edge] = Q_combined.get(edge, 0.0) + coeff
 
     # Create meta-cluster (automatically added)
     meta_tickers = [f"META_{i}" for i in range(n_asset_clusters)]
@@ -163,8 +170,17 @@ def create_dummy_portfolio_bqm(
         columns=meta_tickers
     )
 
-    meta_bqm = formulator.formulate_cluster(meta_tickers, meta_mu, meta_Sigma)
-    combined_bqm.update(meta_bqm)
+    meta_bqm = formulator.formulate_cluster(meta_tickers, meta_mu, meta_Sigma, include_budget_constraint=False)
+
+    # Manually merge meta-cluster
+    for var, coeff in meta_bqm.linear.items():
+        h_combined[var] = h_combined.get(var, 0.0) + coeff
+    for edge, coeff in meta_bqm.quadratic.items():
+        Q_combined[edge] = Q_combined.get(edge, 0.0) + coeff
+
+    # Create combined BQM from merged dicts
+    import dimod
+    combined_bqm = dimod.BinaryQuadraticModel(h_combined, Q_combined, 0.0, dimod.BINARY)
 
     # Total clusters = N asset clusters + 1 meta cluster
     total_clusters = n_asset_clusters + 1
@@ -172,62 +188,6 @@ def create_dummy_portfolio_bqm(
     return combined_bqm, asset_variables, meta_tickers, total_clusters
 
 
-def create_dummy_portfolio_bqm_qubo_bits(
-    n_clusters: int,
-    assets_per_cluster: int,
-    n_bits: int,
-    alpha: float = 1.5,
-    beta: float = 0.8
-) -> Tuple:
-    """
-    Create a dummy portfolio BQM for embedding (QUBOFormulator, bit-encoded).
-
-    Args:
-        n_clusters: Number of clusters
-        assets_per_cluster: Assets per cluster
-        n_bits: Number of bits per asset
-        alpha: Return coefficient
-        beta: Risk coefficient
-
-    Returns:
-        (bqm, all_tickers, total_assets)
-    """
-    formulator = QUBOFormulator(n_bits=n_bits, alpha=alpha, beta=beta)
-
-    np.random.seed(42)  # Reproducible dummy data
-
-    combined_bqm = None
-    all_tickers = []
-
-    # Create clusters
-    for cluster_id in range(n_clusters):
-        cluster_tickers = [f"ASSET_{cluster_id}_{i}" for i in range(assets_per_cluster)]
-        all_tickers.extend(cluster_tickers)
-
-        # Dummy returns and covariance
-        mu = pd.Series(np.random.randn(assets_per_cluster) * 0.1 + 0.1, index=cluster_tickers)
-
-        corr = np.random.rand(assets_per_cluster, assets_per_cluster) * 0.6 - 0.3
-        corr = (corr + corr.T) / 2
-        np.fill_diagonal(corr, 1.0)
-
-        vols = np.random.rand(assets_per_cluster) * 0.1 + 0.1
-        Sigma = pd.DataFrame(
-            corr * np.outer(vols, vols),
-            index=cluster_tickers,
-            columns=cluster_tickers
-        )
-
-        bqm = formulator.formulate_cluster(cluster_tickers, mu, Sigma)
-
-        if combined_bqm is None:
-            combined_bqm = bqm
-        else:
-            combined_bqm.update(bqm)
-
-    total_assets = len(all_tickers)
-
-    return combined_bqm, all_tickers, total_assets
 
 
 def find_embedding(
@@ -376,29 +336,8 @@ def generate_template(
             'beta': 2.5,
         }
 
-    elif formulator_type == 'qubo_bits':
-        print(f"  Clusters: {n_clusters}")
-        print(f"  Assets per cluster: {assets_per_cluster}")
-        print(f"  Total assets: {n_clusters * assets_per_cluster}")
-        print(f"  Bits per asset: {n_levels_or_bits}")
-
-        bqm, all_tickers, total_assets = create_dummy_portfolio_bqm_qubo_bits(
-            n_clusters, assets_per_cluster, n_levels_or_bits
-        )
-
-        print(f"  Variables: {len(bqm.variables)}")
-        print(f"  Edges: {len(bqm.quadratic)}")
-
-        config = {
-            'n_clusters': n_clusters,
-            'assets_per_cluster': assets_per_cluster,
-            'total_assets': total_assets,
-            'n_bits': n_levels_or_bits,
-            'alpha': 1.5,
-            'beta': 0.8,
-        }
     else:
-        raise ValueError(f"Unknown formulator type: {formulator_type}")
+        raise ValueError(f"Unknown formulator type: {formulator_type}. Only 'discrete_levels' is supported.")
 
     # Find embedding
     embedding = find_embedding(

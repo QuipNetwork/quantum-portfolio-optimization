@@ -38,13 +38,13 @@ class DiscreteLevelsOptimizer:
 
     def __init__(self,
                  n_levels: int = 6,  # Match available templates (most are 6 levels)
-                 alpha: float = 5.0,
-                 beta: float = 2.5,
-                 budget_penalty: float = 200.0,  # Strong penalty for budget constraint
-                 thermometer_penalty: float = 10.0,  # Relaxed penalty for thermometer encoding
+                 alpha: float = 1.5,
+                 beta: float = .5,
+                 budget_penalty: float = 0.0,  
+                 thermometer_penalty: float = 5.0, 
                  solver_type: str = 'simulated',
-                 num_reads: int = 20,
-                 num_sweeps: int = 256,
+                 num_reads: Optional[int] = None,
+                 num_sweeps: Optional[int] = None,
                  max_cluster_size: int = 19,
                  portfolio_info_csv: str = "portfolio-info.csv",
                  clusterer: Optional[Any] = None,
@@ -60,8 +60,8 @@ class DiscreteLevelsOptimizer:
             beta: Risk coefficient (default 2.5, ratio=0.5)
             thermometer_penalty: Penalty for invalid thermometer encoding
             solver_type: 'simulated' or 'qpu'
-            num_reads: Number of annealing samples
-            num_sweeps: Sweeps for simulated annealing (default 256, normalized)
+            num_reads: Number of annealing samples (default: 512 for SA, 10 for QPU)
+            num_sweeps: Sweeps for simulated annealing (default 256, ignored for QPU)
             max_cluster_size: Maximum assets per cluster (19 for native embedding)
             portfolio_info_csv: Path to portfolio info for sector data
             clusterer: Custom clusterer (default: SectorClusterer)
@@ -74,8 +74,18 @@ class DiscreteLevelsOptimizer:
         self.budget_penalty = budget_penalty
         self.thermometer_penalty = thermometer_penalty
         self.solver_type = solver_type
-        self.num_reads = num_reads
-        self.num_sweeps = num_sweeps
+
+        # Set num_reads based on solver type if not specified
+        if num_reads is None:
+            self.num_reads = 10 if solver_type == 'qpu' else 256
+        else:
+            self.num_reads = num_reads
+
+        # Set num_sweeps based on solver type if not specified
+        if num_sweeps is None:
+            self.num_sweeps = 256 if solver_type == 'simulated' else 0
+        else:
+            self.num_sweeps = num_sweeps
         self.max_cluster_size = max_cluster_size
         self.portfolio_info_csv = portfolio_info_csv
         self.expected_assets_per_cluster = expected_assets_per_cluster
@@ -184,15 +194,62 @@ class DiscreteLevelsOptimizer:
 
         return padded_clusters, padded_mu, padded_Sigma, real_tickers
 
+    def _validate_and_fix_bqm_topology(self, bqm: dimod.BinaryQuadraticModel, cluster_info: list, embedding: dict) -> dimod.BinaryQuadraticModel:
+        """
+        Ensure BQM topology matches template embedding.
+
+        The runtime BQM may have more edges than the template (due to different covariance
+        structures). Remove edges that can't be embedded by the template.
+
+        Args:
+            bqm: The BQM to validate
+            cluster_info: List of cluster metadata (with tickers)
+            embedding: The template embedding dict
+
+        Returns:
+            BQM with topology matching template
+        """
+        embedded_vars = set(embedding.keys())
+
+        # Build set of all possible edges between embedded variables
+        # (Template can embed any edge between its variables)
+        embeddable_edges = set()
+        embedded_var_list = list(embedded_vars)
+        for i, u in enumerate(embedded_var_list):
+            for v in embedded_var_list[i+1:]:
+                embeddable_edges.add(tuple(sorted([u, v])))
+
+        # Remove edges not in template
+        edges_to_remove = [edge for edge in bqm.quadratic if edge not in embeddable_edges]
+        for edge in edges_to_remove:
+            bqm.remove_interaction(edge[0], edge[1])
+
+        # Remove variables not in embedding
+        vars_to_remove = set(bqm.variables) - embedded_vars
+        for var in vars_to_remove:
+            bqm.remove_variable(var)
+
+        # Add missing variables with zero bias
+        missing_vars = embedded_vars - set(bqm.variables)
+        for var in missing_vars:
+            bqm.add_variable(var, 0.0)
+
+        return bqm
+
     def _combine_cluster_bqms(self, clusters, mu, Sigma):
         """
         Combine multiple independent cluster BQMs into one large BQM.
 
         This allows solving all clusters in a single QPU call.
+
+        Note: We build the combined BQM directly from h/Q dicts instead of using
+        .update() to avoid numerical precision issues that can cause edges to be dropped.
         """
         import dimod
 
-        combined_bqm = dimod.BinaryQuadraticModel('BINARY')
+        # Build combined h and Q dictionaries directly
+        h_combined = {}
+        Q_combined = {}
         cluster_info = []
 
         # Handle both dict and list formats
@@ -209,19 +266,30 @@ class DiscreteLevelsOptimizer:
             cluster_mu = pd.Series(mu[cluster_tickers])
             cluster_Sigma = pd.DataFrame(Sigma.loc[cluster_tickers, cluster_tickers])
 
-            # Create BQM for this cluster
+            # Create BQM for this cluster WITHOUT budget constraint
+            # Budget constraint creates O(N²×L²) dense couplings, defeating sparse graph benefits
+            # Post-processing normalizes weights, so budget constraint is unnecessary
             bqm = self.formulator.formulate_cluster(
-                cluster_tickers, cluster_mu, cluster_Sigma
+                cluster_tickers, cluster_mu, cluster_Sigma,
+                include_budget_constraint=False
             )
 
-            # Add to combined BQM (clusters are independent, no couplings between them)
-            combined_bqm.update(bqm)
+            # Manually merge linear terms (h)
+            for var, coeff in bqm.linear.items():
+                h_combined[var] = h_combined.get(var, 0.0) + coeff
+
+            # Manually merge quadratic terms (Q)
+            for edge, coeff in bqm.quadratic.items():
+                Q_combined[edge] = Q_combined.get(edge, 0.0) + coeff
 
             cluster_info.append({
                 'id': cluster_id,
                 'tickers': cluster_tickers,
                 'variables': list(bqm.variables)
             })
+
+        # Build combined BQM from merged dictionaries
+        combined_bqm = dimod.BinaryQuadraticModel(h_combined, Q_combined, 0.0, dimod.BINARY)
 
         return combined_bqm, cluster_info
 
@@ -381,15 +449,20 @@ class DiscreteLevelsOptimizer:
             # 1. Create BQMs for all asset clusters
             combined_bqm, cluster_info = self._combine_cluster_bqms(clusters, mu, Sigma)
 
-            # 2. Create meta-cluster BQM
+            # 2. Create meta-cluster BQM (without budget constraint)
             meta_cluster_tickers = list(cluster_ids)
             meta_bqm = self.formulator.formulate_cluster(
-                meta_cluster_tickers, cluster_mu, cluster_Sigma
+                meta_cluster_tickers, cluster_mu, cluster_Sigma,
+                include_budget_constraint=False
             )
 
             # 3. Combine asset clusters + meta-cluster BQMs
             # (They are independent, no couplings between them)
-            combined_bqm.update(meta_bqm)
+            # Manually merge to avoid numerical precision issues with .update()
+            for var, coeff in meta_bqm.linear.items():
+                combined_bqm.add_variable(var, coeff)
+            for edge, coeff in meta_bqm.quadratic.items():
+                combined_bqm.add_interaction(edge[0], edge[1], coeff)
 
             # Add meta-cluster info
             cluster_info.append({
@@ -398,8 +471,11 @@ class DiscreteLevelsOptimizer:
                 'variables': list(meta_bqm.variables)
             })
 
-            # Use full portfolio template (pre-computed for N asset clusters + 1 meta-cluster)
+            # Load template embedding
             combined_embedding = self.embedding_mgr.get_full_portfolio_embedding(cluster_info, self.n_levels)
+
+            # Validate and fix BQM topology to match template
+            combined_bqm = self._validate_and_fix_bqm_topology(combined_bqm, cluster_info, combined_embedding)
 
             # Create sampler with fixed embedding
             sampler = FixedEmbeddingComposite(self._qpu_sampler, combined_embedding)
@@ -449,14 +525,19 @@ class DiscreteLevelsOptimizer:
             # 1. Create BQMs for all asset clusters
             combined_bqm, cluster_info = self._combine_cluster_bqms(clusters, mu, Sigma)
 
-            # 2. Create meta-cluster BQM
+            # 2. Create meta-cluster BQM (without budget constraint)
             meta_cluster_tickers = list(cluster_ids)
             meta_bqm = self.formulator.formulate_cluster(
-                meta_cluster_tickers, cluster_mu, cluster_Sigma
+                meta_cluster_tickers, cluster_mu, cluster_Sigma,
+                include_budget_constraint=False
             )
 
             # 3. Combine asset clusters + meta-cluster BQMs
-            combined_bqm.update(meta_bqm)
+            # Manually merge to avoid numerical precision issues with .update()
+            for var, coeff in meta_bqm.linear.items():
+                combined_bqm.add_variable(var, coeff)
+            for edge, coeff in meta_bqm.quadratic.items():
+                combined_bqm.add_interaction(edge[0], edge[1], coeff)
 
             # Add meta-cluster info
             cluster_info.append({

@@ -21,22 +21,20 @@ import time
 
 load_dotenv()
 
-def create_test_bqm(cluster_size, n_levels=10):
+def create_test_bqm(n_clusters, assets_per_cluster, n_levels=10):
     """Create a test BQM with specified configuration.
 
     Args:
-        cluster_size: Both num_clusters and assets_per_cluster (they must be equal)
+        n_clusters: Number of asset clusters
+        assets_per_cluster: Assets per cluster
         n_levels: Number of discrete levels
     """
-    n_clusters = cluster_size
-    assets_per_cluster = cluster_size
-
     formulator = DiscreteLevelFormulator(n_levels=n_levels)
 
     # Generate dummy data
     np.random.seed(42)
 
-    # Create asset clusters
+    # Create asset clusters WITHOUT budget constraint (matches optimizer)
     combined_bqm = None
     all_assets = []
 
@@ -59,14 +57,15 @@ def create_test_bqm(cluster_size, n_levels=10):
             columns=cluster_tickers
         )
 
-        bqm = formulator.formulate_cluster(cluster_tickers, mu, Sigma)
+        # No budget constraint (sparse graph)
+        bqm = formulator.formulate_cluster(cluster_tickers, mu, Sigma, include_budget_constraint=False)
 
         if combined_bqm is None:
             combined_bqm = bqm
         else:
             combined_bqm.update(bqm)
 
-    # Add meta-cluster
+    # Add meta-cluster WITHOUT budget constraint (matches optimizer)
     meta_tickers = [f"META_{i}" for i in range(n_clusters)]
     meta_mu = pd.Series(np.random.randn(n_clusters) * 0.08 + 0.1, index=meta_tickers)
 
@@ -81,34 +80,34 @@ def create_test_bqm(cluster_size, n_levels=10):
         columns=meta_tickers
     )
 
-    meta_bqm = formulator.formulate_cluster(meta_tickers, meta_mu, meta_Sigma)
+    # No budget constraint (sparse graph)
+    meta_bqm = formulator.formulate_cluster(meta_tickers, meta_mu, meta_Sigma, include_budget_constraint=False)
     combined_bqm.update(meta_bqm)
 
     return combined_bqm, len(all_assets)
 
-def test_configuration(cluster_size, n_levels, sampler, timeout=600):
+def test_configuration(n_clusters, assets_per_cluster, n_levels, sampler, timeout=600):
     """Test if a configuration can be embedded.
 
     Args:
-        cluster_size: Both num_clusters and assets_per_cluster (they must be equal)
+        n_clusters: Number of asset clusters
+        assets_per_cluster: Assets per cluster
         n_levels: Number of discrete levels
         sampler: D-Wave sampler
         timeout: Embedding timeout in seconds
     """
 
-    n_clusters = cluster_size
-    assets_per_cluster = cluster_size
-    total_assets = cluster_size * cluster_size
+    total_assets = n_clusters * assets_per_cluster
 
     print(f"\n{'='*70}", flush=True)
-    print(f"TESTING: {cluster_size} clusters × {cluster_size} assets/cluster = {total_assets} total assets × {n_levels} levels", flush=True)
+    print(f"TESTING: {n_clusters} clusters × {assets_per_cluster} assets/cluster = {total_assets} total assets × {n_levels} levels", flush=True)
     print(f"{'='*70}", flush=True)
 
     start = time.time()
 
     # Create BQM
     print(f"[{time.strftime('%H:%M:%S')}] Creating BQM...", flush=True)
-    bqm, actual_assets = create_test_bqm(cluster_size, n_levels=n_levels)
+    bqm, actual_assets = create_test_bqm(n_clusters, assets_per_cluster, n_levels=n_levels)
 
     print(f"  Variables: {len(bqm.variables)}", flush=True)
     print(f"  Quadratic: {len(bqm.quadratic)}", flush=True)
@@ -206,71 +205,118 @@ def test_configuration(cluster_size, n_levels, sampler, timeout=600):
         return None
 
 def find_max_cluster_size_for_levels(n_levels, sampler, timeout=600, start_cluster_size=8):
-    """Binary search to find maximum cluster_size for a given n_levels.
+    """Two-phase search to find maximum cluster configuration for a given n_levels.
+
+    Phase 1: Find max cluster_size where num_clusters = assets_per_cluster (square config)
+    Phase 2: Keep optimal num_clusters, increase assets_per_cluster by 1 until failure
 
     Args:
         n_levels: Number of discrete levels to test
         sampler: D-Wave sampler
         timeout: Embedding timeout in seconds
-        start_cluster_size: Starting cluster size (num_clusters = assets_per_cluster)
+        start_cluster_size: Starting cluster size for Phase 1
 
     Returns:
-        tuple: (max_assets, result_dict) where max_assets is the maximum embeddable
-               number of total assets and result_dict contains the embedding details
+        list of result dicts for all successful configurations
     """
     print(f"\n{'='*70}", flush=True)
-    print(f"SEARCHING FOR MAX CLUSTER SIZE WITH n_levels={n_levels}", flush=True)
+    print(f"SEARCHING FOR MAX CLUSTER CONFIGURATIONS WITH n_levels={n_levels}", flush=True)
+    print(f"{'='*70}", flush=True)
+
+    all_successful_configs = []
+
+    # PHASE 1: Find optimal num_clusters (where num_clusters = assets_per_cluster)
+    print(f"\n{'='*70}", flush=True)
+    print(f"PHASE 1: Finding optimal num_clusters (square configuration)", flush=True)
     print(f"Constraint: num_clusters = assets_per_cluster = cluster_size", flush=True)
     print(f"{'='*70}", flush=True)
 
-    # Start with a reasonable lower bound
     cluster_size = start_cluster_size
     last_successful = None
 
-    # First, find an upper bound by doubling until we fail
-    print(f"\nPhase 1: Finding upper bound...", flush=True)
+    # Find upper bound by doubling
+    print(f"\nPhase 1a: Finding upper bound...", flush=True)
     while True:
-        result = test_configuration(cluster_size, n_levels, sampler, timeout)
+        result = test_configuration(cluster_size, cluster_size, n_levels, sampler, timeout)
         if result:
             total = cluster_size * cluster_size
             print(f"  ✓ cluster_size={cluster_size} ({total} total assets): SUCCESS", flush=True)
             last_successful = result
-            cluster_size *= 2  # Double the size
+            all_successful_configs.append(result)
+            cluster_size *= 2
         else:
             total = cluster_size * cluster_size
             print(f"  ✗ cluster_size={cluster_size} ({total} total assets): FAILED", flush=True)
             print(f"  Upper bound found: cluster_size={cluster_size}", flush=True)
             break
 
-    # Now binary search between last_successful and current cluster_size
     if last_successful is None:
         print(f"\n✗ Could not embed even cluster_size={start_cluster_size}", flush=True)
-        return None, None
+        return []
 
-    lower = last_successful['n_clusters']  # n_clusters = assets_per_cluster = cluster_size
+    # Binary search for exact maximum
+    lower = last_successful['n_clusters']
     upper = cluster_size
 
-    print(f"\nPhase 2: Binary search between {lower} and {upper}...", flush=True)
+    print(f"\nPhase 1b: Binary search between {lower} and {upper}...", flush=True)
 
     while lower < upper - 1:
         mid = (lower + upper) // 2
-        result = test_configuration(mid, n_levels, sampler, timeout)
+        result = test_configuration(mid, mid, n_levels, sampler, timeout)
 
         if result:
             total = mid * mid
             print(f"  ✓ cluster_size={mid} ({total} total assets): SUCCESS", flush=True)
             last_successful = result
+            all_successful_configs.append(result)
             lower = mid
         else:
             total = mid * mid
             print(f"  ✗ cluster_size={mid} ({total} total assets): FAILED", flush=True)
             upper = mid
 
+    optimal_n_clusters = last_successful['n_clusters']
+    optimal_assets_per_cluster = last_successful['assets_per_cluster']
+
     print(f"\n{'='*70}", flush=True)
-    print(f"MAXIMUM FOUND: cluster_size={last_successful['n_clusters']} ({last_successful['n_clusters']}×{last_successful['assets_per_cluster']} = {last_successful['total_assets']} total assets) for n_levels={n_levels}", flush=True)
+    print(f"PHASE 1 COMPLETE: Optimal num_clusters = {optimal_n_clusters}", flush=True)
+    print(f"  Configuration: {optimal_n_clusters} clusters × {optimal_assets_per_cluster} assets = {optimal_n_clusters * optimal_assets_per_cluster} total assets", flush=True)
     print(f"{'='*70}", flush=True)
 
-    return last_successful['total_assets'], last_successful
+    # PHASE 2: Keep num_clusters fixed, increase assets_per_cluster by 1 until failure
+    print(f"\n{'='*70}", flush=True)
+    print(f"PHASE 2: Increasing assets_per_cluster (keep num_clusters={optimal_n_clusters})", flush=True)
+    print(f"Meta-cluster constraint: assets_per_cluster must not exceed num_clusters", flush=True)
+    print(f"{'='*70}", flush=True)
+
+    current_assets_per_cluster = optimal_assets_per_cluster + 1
+
+    while True:
+        # Meta-cluster cannot have more assets than there are clusters
+        # (meta-cluster has num_clusters assets, one per cluster)
+        if current_assets_per_cluster > optimal_n_clusters:
+            print(f"\n✗ Stopping: assets_per_cluster={current_assets_per_cluster} would exceed num_clusters={optimal_n_clusters}", flush=True)
+            print(f"  Meta-cluster cannot be encoded (needs {optimal_n_clusters} levels but assets have {current_assets_per_cluster} levels)", flush=True)
+            break
+
+        result = test_configuration(optimal_n_clusters, current_assets_per_cluster, n_levels, sampler, timeout)
+
+        if result:
+            total = optimal_n_clusters * current_assets_per_cluster
+            print(f"  ✓ {optimal_n_clusters} clusters × {current_assets_per_cluster} assets ({total} total): SUCCESS", flush=True)
+            all_successful_configs.append(result)
+            current_assets_per_cluster += 1
+        else:
+            total = optimal_n_clusters * current_assets_per_cluster
+            print(f"  ✗ {optimal_n_clusters} clusters × {current_assets_per_cluster} assets ({total} total): FAILED", flush=True)
+            print(f"  Maximum assets_per_cluster found: {current_assets_per_cluster - 1}", flush=True)
+            break
+
+    print(f"\n{'='*70}", flush=True)
+    print(f"PHASE 2 COMPLETE: Found {len(all_successful_configs)} embeddable configurations", flush=True)
+    print(f"{'='*70}", flush=True)
+
+    return all_successful_configs
 
 
 def find_optimal():
@@ -297,14 +343,12 @@ def find_optimal():
 
     # Store all successful results
     all_results = []
-    max_results = {}
 
     for n_levels in n_levels_list:
-        max_assets, result = find_max_cluster_size_for_levels(n_levels, sampler, timeout, start_cluster_size=8)
+        configs = find_max_cluster_size_for_levels(n_levels, sampler, timeout, start_cluster_size=8)
 
-        if result:
-            all_results.append(result)
-            max_results[n_levels] = (max_assets, result)
+        if configs:
+            all_results.extend(configs)
         else:
             print(f"\n✗ Failed to find any embeddable configuration for n_levels={n_levels}", flush=True)
 
@@ -317,17 +361,22 @@ def find_optimal():
         print(f"\n✗ No configurations succeeded.", flush=True)
         return []
 
-    print(f"\nMaximum embeddable assets by n_levels:", flush=True)
-    for n_levels in n_levels_list:
-        if n_levels in max_results:
-            max_assets, result = max_results[n_levels]
-            print(f"\n  n_levels = {n_levels}:", flush=True)
-            print(f"    Max assets: {max_assets}", flush=True)
-            print(f"    Variables: {result['n_variables']}", flush=True)
-            print(f"    Qubits used: {result['total_qubits']} ({result['total_qubits']/sampler.properties['num_qubits']*100:.1f}%)", flush=True)
-            print(f"    Avg chain length: {result['avg_chain_length']:.2f}", flush=True)
-            print(f"    Max chain length: {result['max_chain_length']}", flush=True)
-            print(f"    Embedding time: {result['embedding_time']/60:.1f} minutes", flush=True)
+    print(f"\nTotal successful configurations: {len(all_results)}", flush=True)
+
+    # Group by n_levels for summary
+    by_levels = {}
+    for result in all_results:
+        n_lev = result['n_levels']
+        if n_lev not in by_levels:
+            by_levels[n_lev] = []
+        by_levels[n_lev].append(result)
+
+    for n_levels in sorted(by_levels.keys()):
+        configs = by_levels[n_levels]
+        print(f"\n  n_levels = {n_levels}: {len(configs)} configurations", flush=True)
+        for cfg in configs:
+            print(f"    {cfg['n_clusters']} clusters × {cfg['assets_per_cluster']} assets = {cfg['total_assets']} total", flush=True)
+            print(f"      Variables: {cfg['n_variables']}, Qubits: {cfg['total_qubits']} ({cfg['total_qubits']/sampler.properties['num_qubits']*100:.1f}%)", flush=True)
 
 
     # Save all successful templates

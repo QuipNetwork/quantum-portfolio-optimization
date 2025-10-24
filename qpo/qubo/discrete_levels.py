@@ -172,6 +172,9 @@ class DiscreteLevelFormulator:
                             key = tuple(sorted([var_i, var_j]))
                             Q[key] = Q.get(key, 0) + coeff
 
+        # Note: constant offset +λ not included in hierarchical formulation
+        # Each cluster/meta-cluster optimizes independently with its own budget constraint
+        # Post-processing handles final normalization and scaling
         return dimod.BinaryQuadraticModel(h, Q, 0.0, dimod.BINARY)
 
     def formulate_inter_cluster(self,
@@ -503,13 +506,9 @@ class DiscreteLevelFormulator:
             logger = logging.getLogger(__name__)
             logger.warning(f"Thermometer constraint violations: {thermometer_violations} bits violated")
 
-        # Check budget constraint before normalization
+        # Normalize weights (no budget constraint warning since we rely on post-processing normalization)
         weight_sum = weights.sum()
         if weight_sum > 0:
-            if warn_budget_violation and abs(weight_sum - 1.0) > 0.1:  # More than 10% deviation
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.warning(f"Budget constraint violation: weights sum to {weight_sum:.3f} (expected ~1.0)")
             weights = weights / weight_sum
         else:
             # CRITICAL: All-zero solution detected
