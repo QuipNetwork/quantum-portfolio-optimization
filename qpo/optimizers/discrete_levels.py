@@ -628,9 +628,285 @@ class DiscreteLevelsOptimizer:
 
         return beta_meta
 
+    def _create_combined_bqm(
+        self,
+        clusters: Dict[str, List[str]],
+        mu: pd.Series,
+        Sigma: pd.DataFrame,
+        cluster_ids: List[str],
+        cluster_mu: np.ndarray,
+        cluster_Sigma: np.ndarray,
+        returns: pd.DataFrame
+    ) -> Tuple[Any, List[Dict]]:
+        """
+        Create combined BQM for all asset clusters + meta-cluster.
+
+        Args:
+            clusters: Dictionary of cluster_id -> ticker list
+            mu: Mean returns (padded)
+            Sigma: Covariance matrix (padded)
+            cluster_ids: List of cluster IDs
+            cluster_mu: Cluster-level mean returns
+            cluster_Sigma: Cluster-level covariance matrix
+            returns: Returns DataFrame for dynamic beta calculation
+
+        Returns:
+            Tuple of (combined_bqm, cluster_info)
+        """
+        # 1. Create BQMs for all asset clusters
+        combined_bqm, cluster_info = self._combine_cluster_bqms(clusters, mu, Sigma)
+
+        # 2. Create meta-cluster BQM with dynamic risk aversion
+        meta_cluster_tickers = list(cluster_ids)
+        meta_beta = self._compute_dynamic_meta_beta(returns)
+
+        # Create temporary formulator with adjusted beta for meta-cluster
+        from qpo.qubo.discrete_levels import DiscreteLevelFormulator
+        meta_formulator = DiscreteLevelFormulator(
+            n_levels=self.n_levels,
+            alpha=self.alpha,
+            beta=meta_beta,
+            thermometer_penalty=self.thermometer_penalty,
+            l1_sparsity_penalty=self.l1_sparsity_penalty
+        )
+
+        meta_bqm = meta_formulator.formulate_cluster(
+            meta_cluster_tickers, cluster_mu, cluster_Sigma
+        )
+
+        # 3. Combine asset clusters + meta-cluster BQMs
+        # Manually merge to avoid numerical precision issues with .update()
+        for var, coeff in meta_bqm.linear.items():
+            combined_bqm.add_variable(var, coeff)
+        for edge, coeff in meta_bqm.quadratic.items():
+            combined_bqm.add_interaction(edge[0], edge[1], coeff)
+
+        # Add meta-cluster info
+        cluster_info.append({
+            'id': 'META_CLUSTER',
+            'tickers': meta_cluster_tickers,
+            'variables': list(meta_bqm.variables)
+        })
+
+        return combined_bqm, cluster_info
+
+    def _solve_with_fixed_embedding(
+        self,
+        combined_bqm: Any,
+        cluster_info: List[Dict]
+    ) -> Tuple[Dict, float, float, float]:
+        """
+        Solve combined BQM using FixedEmbeddingComposite (works for both QPU and SA).
+
+        Args:
+            combined_bqm: Combined BQM for all clusters
+            cluster_info: List of cluster metadata dicts
+
+        Returns:
+            Tuple of (best_sample, runtime, qpu_access_time, network_time)
+        """
+        from dwave.system import FixedEmbeddingComposite
+
+        # Load template embedding
+        combined_embedding = self.embedding_mgr.get_full_portfolio_embedding(
+            cluster_info, self.n_levels
+        )
+
+        # Get base sampler based on solver type
+        if self.solver_type == 'qpu':
+            # Initialize QPU sampler if needed
+            if self._qpu_sampler is None:
+                from dwave.system import DWaveSampler
+                import os
+                solver_name = os.environ.get('DWAVE_API_SOLVER', 'Advantage2_system1.6')
+                self._qpu_sampler = DWaveSampler(solver=solver_name)
+            base_sampler = self._qpu_sampler
+        else:  # simulated annealing
+            from neal import SimulatedAnnealingSampler
+            base_sampler = SimulatedAnnealingSampler()
+
+        # Create fixed embedding composite (works for both QPU and SA)
+        sampler = FixedEmbeddingComposite(base_sampler, combined_embedding)
+
+        # Solve
+        start_solve = time.time()
+        response = sampler.sample(
+            combined_bqm,
+            num_reads=self.num_reads,
+            num_sweeps=self.num_sweeps if self.solver_type == 'simulated' else None
+        )
+        solve_time = time.time() - start_solve
+
+        # Extract timing info (QPU only)
+        qpu_access_time = 0.0
+        network_time = 0.0
+        if self.solver_type == 'qpu' and hasattr(response, 'info'):
+            qpu_access_time = response.info.get('timing', {}).get('qpu_access_time', 0.0) / 1000.0  # Convert to ms
+            network_time = solve_time - (qpu_access_time / 1000.0)  # Approximate network time
+
+        return response.first.sample, solve_time, qpu_access_time, network_time
+
+    def _decode_cluster_results(
+        self,
+        best_sample: Dict,
+        cluster_info: List[Dict],
+        returns: pd.DataFrame
+    ) -> Tuple[Dict, pd.Series]:
+        """
+        Decode cluster results from BQM solution.
+
+        Args:
+            best_sample: Best sample from solver
+            cluster_info: List of cluster metadata
+            returns: Returns DataFrame for return adjustment
+
+        Returns:
+            Tuple of (cluster_results, meta_cluster_weights)
+        """
+        cluster_results = {}
+        meta_cluster_weights = None
+
+        for cluster_data in cluster_info:
+            cluster_id = cluster_data['id']
+            cluster_tickers = cluster_data['tickers']
+
+            # Decode this cluster's portion of the solution
+            cluster_weights = self.formulator.decode_solution(
+                best_sample, cluster_tickers
+            )
+
+            # Apply return adjustment to ALL clusters
+            return_adjusted_weights = self._apply_return_adjustment(
+                cluster_weights, returns, cluster_tickers
+            )
+
+            if cluster_id == 'META_CLUSTER':
+                # Apply k-spread ONLY to meta-cluster
+                meta_cluster_weights = self._apply_k_spread(return_adjusted_weights)
+            else:
+                # Asset clusters: apply thermometer cutoff per-cluster (if enabled)
+                if self.use_thermometer_cutoff:
+                    filtered_weights = self._apply_thermometer_cutoff(return_adjusted_weights)
+                else:
+                    filtered_weights = return_adjusted_weights
+
+                cluster_results[cluster_id] = {
+                    'weights': filtered_weights,
+                    'tickers': cluster_tickers
+                }
+
+        return cluster_results, meta_cluster_weights
+
+    def _prepare_clusters_and_statistics(
+        self,
+        returns: pd.DataFrame,
+        mu_original: pd.Series,
+        Sigma_original: pd.DataFrame
+    ) -> Tuple[Dict[str, List[str]], pd.Series, pd.DataFrame, set, List[str], np.ndarray, np.ndarray, Dict]:
+        """
+        Prepare clusters with padding and compute cluster-level statistics.
+
+        Args:
+            returns: Returns DataFrame
+            mu_original: Original mean returns (annualized)
+            Sigma_original: Original covariance matrix (annualized)
+
+        Returns:
+            Tuple of:
+            - clusters: Padded clusters dict
+            - mu: Padded mean returns
+            - Sigma: Padded covariance matrix
+            - real_tickers: Set of actual (non-dummy) tickers
+            - cluster_ids: List of cluster IDs
+            - cluster_mu: Cluster-level mean returns
+            - cluster_Sigma: Cluster-level covariance matrix
+            - cluster_tickers_map: Mapping of cluster_id -> tickers
+        """
+        tickers = list(mu_original.index)
+        clusters = self.clusterer.cluster(returns)
+
+        # Auto-select template if enabled
+        self._auto_select_template(clusters)
+
+        # Prepare for padding
+        real_tickers = set(tickers)
+        mu = mu_original
+        Sigma = Sigma_original
+
+        # Pad clusters to match fixed template if specified
+        if self.expected_assets_per_cluster is not None:
+            clusters, mu, Sigma, real_tickers = self._pad_clusters_to_size(
+                clusters, self.expected_assets_per_cluster, mu_original, Sigma_original,
+                target_n_clusters=self.expected_n_clusters
+            )
+
+        # Compute cluster statistics for meta-cluster
+        cluster_ids, cluster_mu, cluster_Sigma, cluster_tickers_map = \
+            self._compute_cluster_statistics(clusters, mu, Sigma)
+
+        return clusters, mu, Sigma, real_tickers, cluster_ids, cluster_mu, cluster_Sigma, cluster_tickers_map
+
+    def _auto_select_template(self, clusters: Dict[str, List[str]]) -> None:
+        """
+        Auto-select the best-fitting template based on cluster structure.
+
+        Updates self.expected_n_clusters and self.expected_assets_per_cluster
+        with the smallest template that can accommodate all clusters.
+
+        Args:
+            clusters: Dictionary mapping cluster_id -> list of ticker symbols
+        """
+        if not self.auto_select_template or self.expected_assets_per_cluster is not None:
+            return  # Already manually specified or auto-select disabled
+
+        # Find actual portfolio dimensions
+        n_actual_clusters = len(clusters)
+        max_actual_assets = max(len(tickers) for tickers in clusters.values())
+
+        # Find available templates
+        import glob
+        from pathlib import Path
+        template_dir = Path(__file__).parent.parent.parent / 'embeddings' / 'templates'
+        available_templates = glob.glob(str(template_dir / f'portfolio_*c_*a_{self.n_levels}l.json'))
+
+        if not available_templates:
+            return  # No templates available
+
+        # Parse template dimensions and find best fit
+        best_template = None
+        best_waste = float('inf')
+
+        for template_path in available_templates:
+            fname = Path(template_path).stem  # e.g., "portfolio_12c_16a_6l"
+            parts = fname.split('_')
+            if len(parts) >= 3:
+                template_clusters = int(parts[1].rstrip('c'))
+                template_assets = int(parts[2].rstrip('a'))
+
+                # Check if this template can fit our portfolio
+                if template_clusters >= n_actual_clusters and template_assets >= max_actual_assets:
+                    # Calculate "waste" (excess capacity)
+                    waste = (template_clusters - n_actual_clusters) * template_assets + \
+                            (template_assets - max_actual_assets) * n_actual_clusters
+
+                    if waste < best_waste:
+                        best_waste = waste
+                        best_template = (template_clusters, template_assets)
+
+        if best_template:
+            self.expected_n_clusters, self.expected_assets_per_cluster = best_template
+            print(f"Auto-selected template: {self.expected_n_clusters}c × "
+                  f"{self.expected_assets_per_cluster}a × {self.n_levels}l")
+
     def optimize(self, returns: pd.DataFrame) -> dict:
         """
-        Optimize portfolio weights.
+        Optimize portfolio weights using quantum annealing with clustering.
+
+        This method orchestrates the full optimization pipeline:
+        1. Prepare clusters with padding and statistics
+        2. Create combined BQM for all clusters + meta-cluster
+        3. Solve using FixedEmbeddingComposite (QPU or SA)
+        4. Decode and aggregate results
 
         Args:
             returns: Returns DataFrame (dates × tickers)
@@ -639,282 +915,37 @@ class DiscreteLevelsOptimizer:
             Dictionary with 'weights' and 'metrics'
         """
         # Compute mu and Sigma from returns (preprocessing, not timed)
-        mu_original = returns.mean() * TRADING_DAYS_PER_YEAR  # Annualized returns
-        Sigma_original = returns.cov() * TRADING_DAYS_PER_YEAR  # Annualized covariance
+        mu_original = returns.mean() * TRADING_DAYS_PER_YEAR
+        Sigma_original = returns.cov() * TRADING_DAYS_PER_YEAR
 
-        # Cluster assets (preprocessing, not timed)
-        tickers = list(mu_original.index)
-        clusters = self.clusterer.cluster(returns)
-
-        # Auto-select template if enabled and not manually specified
-        if self.auto_select_template and self.expected_assets_per_cluster is None:
-            # Find best matching template
-            n_actual_clusters = len(clusters)
-            max_actual_assets = max(len(tickers) for tickers in clusters.values())
-
-            # Select first available template that fits (can expand with smarter selection)
-            # For now, use a simple heuristic: pick smallest template that can fit
-            import glob
-            from pathlib import Path
-            template_dir = Path(__file__).parent.parent.parent / 'embeddings' / 'templates'
-            available_templates = glob.glob(str(template_dir / f'portfolio_*c_*a_{self.n_levels}l.json'))
-
-            if available_templates:
-                # Parse template dimensions
-                best_template = None
-                best_waste = float('inf')
-
-                for template_path in available_templates:
-                    fname = Path(template_path).stem  # e.g., "portfolio_12c_16a_6l"
-                    parts = fname.split('_')
-                    if len(parts) >= 3:
-                        template_clusters = int(parts[1].rstrip('c'))
-                        template_assets = int(parts[2].rstrip('a'))
-
-                        # Check if this template can fit our portfolio
-                        if template_clusters >= n_actual_clusters and template_assets >= max_actual_assets:
-                            # Calculate "waste" (excess capacity)
-                            waste = (template_clusters - n_actual_clusters) * template_assets + \
-                                    (template_assets - max_actual_assets) * n_actual_clusters
-
-                            if waste < best_waste:
-                                best_waste = waste
-                                best_template = (template_clusters, template_assets)
-
-                if best_template:
-                    self.expected_n_clusters, self.expected_assets_per_cluster = best_template
-                    print(f"Auto-selected template: {self.expected_n_clusters}c × {self.expected_assets_per_cluster}a × {self.n_levels}l")
-
-        # Pad clusters to match fixed template (required for both QPU and SA)
-        # Templates are mandatory - we always need to match a pre-computed embedding
-        real_tickers = set(tickers)
-        mu = mu_original
-        Sigma = Sigma_original
-
-        if self.expected_assets_per_cluster is not None:
-            # Pad to specified template shape
-            clusters, mu, Sigma, real_tickers = self._pad_clusters_to_size(
-                clusters, self.expected_assets_per_cluster, mu_original, Sigma_original,
-                target_n_clusters=self.expected_n_clusters
-            )
-
-        # Compute cluster statistics for meta-cluster (preprocessing, not timed)
-        cluster_ids, cluster_mu, cluster_Sigma, cluster_tickers_map = \
-            self._compute_cluster_statistics(clusters, mu, Sigma)
-
-        # Initialize QPU sampler if needed (setup, not timed)
-        if self.solver_type == 'qpu' and self._qpu_sampler is None:
-            from dwave.system import DWaveSampler
-            import os
-            solver_name = os.environ.get('DWAVE_API_SOLVER', 'Advantage2_system1.6')
-            self._qpu_sampler = DWaveSampler(solver=solver_name)
+        # Prepare clusters with padding and statistics
+        (clusters, mu, Sigma, real_tickers, cluster_ids,
+         cluster_mu, cluster_Sigma, cluster_tickers_map) = \
+            self._prepare_clusters_and_statistics(returns, mu_original, Sigma_original)
 
         # Start timing (only measure actual solving)
         start_time = time.time()
 
-        # Track QPU-specific timing
-        total_qpu_access_time = 0.0  # microseconds
-        total_network_time = 0.0  # seconds
+        # Create combined BQM for all asset clusters + meta-cluster
+        combined_bqm, cluster_info = self._create_combined_bqm(
+            clusters, mu, Sigma, cluster_ids, cluster_mu, cluster_Sigma, returns
+        )
 
-        # Solve clusters + meta-cluster
-        cluster_results = {}
-        meta_cluster_weights = None
+        # Solve using FixedEmbeddingComposite (works for both QPU and SA)
+        best_sample, solve_time, qpu_access_time, network_time = \
+            self._solve_with_fixed_embedding(combined_bqm, cluster_info)
 
-        if self.solver_type == 'qpu':
-            # QPU: Combine all asset clusters + meta-cluster into one BQM
-            from dwave.system import FixedEmbeddingComposite
+        # Decode cluster results
+        cluster_results, meta_cluster_weights = self._decode_cluster_results(
+            best_sample, cluster_info, returns
+        )
 
-            # 1. Create BQMs for all asset clusters
-            combined_bqm, cluster_info = self._combine_cluster_bqms(clusters, mu, Sigma)
-
-            # 2. Create meta-cluster BQM with dynamic risk aversion
-            meta_cluster_tickers = list(cluster_ids)
-
-            # Compute dynamic beta for meta-cluster (inversely proportional to market conditions)
-            meta_beta = self._compute_dynamic_meta_beta(returns)
-
-            # Create temporary formulator with adjusted beta for meta-cluster
-            from qpo.qubo.discrete_levels import DiscreteLevelFormulator
-            meta_formulator = DiscreteLevelFormulator(
-                n_levels=self.n_levels,
-                alpha=self.alpha,
-                beta=meta_beta,  # Dynamic beta based on market conditions
-                thermometer_penalty=self.thermometer_penalty,
-                l1_sparsity_penalty=self.l1_sparsity_penalty
-            )
-
-            meta_bqm = meta_formulator.formulate_cluster(
-                meta_cluster_tickers, cluster_mu, cluster_Sigma
-            )
-
-            # 3. Combine asset clusters + meta-cluster BQMs
-            # (They are independent, no couplings between them)
-            # Manually merge to avoid numerical precision issues with .update()
-            for var, coeff in meta_bqm.linear.items():
-                combined_bqm.add_variable(var, coeff)
-            for edge, coeff in meta_bqm.quadratic.items():
-                combined_bqm.add_interaction(edge[0], edge[1], coeff)
-
-            # Add meta-cluster info
-            cluster_info.append({
-                'id': 'META_CLUSTER',
-                'tickers': meta_cluster_tickers,
-                'variables': list(meta_bqm.variables)
-            })
-
-            # Load template embedding
-            combined_embedding = self.embedding_mgr.get_full_portfolio_embedding(cluster_info, self.n_levels)
-
-            # Validate and fix BQM topology to match template
-            combined_bqm = self._validate_and_fix_bqm_topology(combined_bqm, cluster_info, combined_embedding)
-
-            # Create sampler with fixed embedding
-            sampler = FixedEmbeddingComposite(self._qpu_sampler, combined_embedding)
-
-            # Sample on QPU (single call for all asset clusters + meta-cluster)
-            qpu_start = time.time()
-            response = sampler.sample(
-                combined_bqm,
-                num_reads=self.num_reads,
-                annealing_time=5
-            )
-            qpu_elapsed = time.time() - qpu_start
-
-            # Extract QPU timing
-            timing = response.info.get('timing', {})
-            qpu_total_time = timing.get('qpu_access_time', 0)
-            qpu_sampling_time = timing.get('qpu_sampling_time', 0)
-
-            total_qpu_access_time = qpu_sampling_time
-            total_network_time = max(0, qpu_elapsed - (qpu_total_time / 1e6))
-
-            # Decode solution for asset clusters and meta-cluster
-            best_sample = response.first.sample
-
-            for cluster_data in cluster_info:
-                cluster_id = cluster_data['id']
-                cluster_tickers = cluster_data['tickers']
-
-                # Decode this cluster's portion of the solution
-                cluster_weights = self.formulator.decode_solution(
-                    best_sample, cluster_tickers
-                )
-
-                # Step 1: Apply return adjustment to ALL clusters
-                return_adjusted_weights = self._apply_return_adjustment(
-                    cluster_weights, returns, cluster_tickers
-                )
-
-                if cluster_id == 'META_CLUSTER':
-                    # Step 2: Apply k-spread ONLY to meta-cluster
-                    meta_cluster_weights = self._apply_k_spread(return_adjusted_weights)
-                else:
-                    # Asset clusters: apply thermometer cutoff per-cluster (if enabled)
-                    if self.use_thermometer_cutoff:
-                        filtered_weights = self._apply_thermometer_cutoff(return_adjusted_weights)
-                    else:
-                        filtered_weights = return_adjusted_weights
-
-                    cluster_results[cluster_id] = {
-                        'weights': filtered_weights,
-                        'tickers': cluster_tickers
-                    }
-
-            # Apply meta-cluster weights to get final portfolio weights
-            final_weights = self._apply_meta_cluster_weights(
-                cluster_results, meta_cluster_weights, real_tickers
-            )
-
-        elif self.solver_type == 'simulated':
-            # For SA: Combine all asset clusters + meta-cluster into one BQM and solve together
-
-            # 1. Create BQMs for all asset clusters
-            combined_bqm, cluster_info = self._combine_cluster_bqms(clusters, mu, Sigma)
-
-            # 2. Create meta-cluster BQM with dynamic risk aversion
-            meta_cluster_tickers = list(cluster_ids)
-
-            # Compute dynamic beta for meta-cluster (inversely proportional to market conditions)
-            meta_beta = self._compute_dynamic_meta_beta(returns)
-
-            # Create temporary formulator with adjusted beta for meta-cluster
-            from qpo.qubo.discrete_levels import DiscreteLevelFormulator
-            meta_formulator = DiscreteLevelFormulator(
-                n_levels=self.n_levels,
-                alpha=self.alpha,
-                beta=meta_beta,  # Dynamic beta based on market conditions
-                thermometer_penalty=self.thermometer_penalty,
-                l1_sparsity_penalty=self.l1_sparsity_penalty
-            )
-
-            meta_bqm = meta_formulator.formulate_cluster(
-                meta_cluster_tickers, cluster_mu, cluster_Sigma
-            )
-
-            # 3. Combine asset clusters + meta-cluster BQMs
-            # Manually merge to avoid numerical precision issues with .update()
-            for var, coeff in meta_bqm.linear.items():
-                combined_bqm.add_variable(var, coeff)
-            for edge, coeff in meta_bqm.quadratic.items():
-                combined_bqm.add_interaction(edge[0], edge[1], coeff)
-
-            # Add meta-cluster info
-            cluster_info.append({
-                'id': 'META_CLUSTER',
-                'tickers': meta_cluster_tickers,
-                'variables': list(meta_bqm.variables)
-            })
-
-            # Solve combined BQM with SA (using neal for consistency)
-            from neal import SimulatedAnnealingSampler
-            sampler = SimulatedAnnealingSampler()
-            response = sampler.sample(
-                combined_bqm,
-                num_reads=self.num_reads,
-                num_sweeps=self.num_sweeps
-            )
-
-            # Decode solution for asset clusters and meta-cluster
-            best_sample = response.first.sample
-
-            for cluster_data in cluster_info:
-                cluster_id = cluster_data['id']
-                cluster_tickers = cluster_data['tickers']
-
-                # Decode this cluster's portion of the solution
-                cluster_weights = self.formulator.decode_solution(
-                    best_sample, cluster_tickers
-                )
-
-                # Step 1: Apply return adjustment to ALL clusters
-                return_adjusted_weights = self._apply_return_adjustment(
-                    cluster_weights, returns, cluster_tickers
-                )
-
-                if cluster_id == 'META_CLUSTER':
-                    # Step 2: Apply k-spread ONLY to meta-cluster
-                    meta_cluster_weights = self._apply_k_spread(return_adjusted_weights)
-                else:
-                    # Asset clusters: apply thermometer cutoff per-cluster (if enabled)
-                    if self.use_thermometer_cutoff:
-                        filtered_weights = self._apply_thermometer_cutoff(return_adjusted_weights)
-                    else:
-                        filtered_weights = return_adjusted_weights
-
-                    cluster_results[cluster_id] = {
-                        'weights': filtered_weights,
-                        'tickers': cluster_tickers
-                    }
-
-            # Apply meta-cluster weights to get final portfolio weights
-            final_weights = self._apply_meta_cluster_weights(
-                cluster_results, meta_cluster_weights, real_tickers
-            )
-
-        # Thermometer cutoff is now applied per-cluster (above), not on final weights
+        # Apply meta-cluster weights to get final portfolio weights
+        final_weights = self._apply_meta_cluster_weights(
+            cluster_results, meta_cluster_weights, real_tickers
+        )
 
         # Compute metrics using original mu/Sigma (before padding)
-        # Align weights with original data
         aligned_weights = final_weights.reindex(mu_original.index, fill_value=0.0)
 
         portfolio_return = np.dot(aligned_weights.values, mu_original.values)
@@ -932,14 +963,14 @@ class DiscreteLevelsOptimizer:
             'sharpe': sharpe,
             'n_clusters': len(cluster_results),
             'runtime': runtime,
-            'solver_only_runtime': runtime  # For comparison
+            'solver_only_runtime': solve_time
         }
 
         # Add QPU-specific timing if available
-        if self.solver_type == 'qpu' and total_qpu_access_time > 0:
-            metrics['qpu_access_time'] = total_qpu_access_time / 1e6  # Convert to seconds
-            metrics['network_latency'] = total_network_time
-            metrics['solver_only_runtime'] = total_qpu_access_time / 1e6  # Actual QPU time
+        if self.solver_type == 'qpu' and qpu_access_time > 0:
+            metrics['qpu_access_time'] = qpu_access_time  # Already in seconds
+            metrics['network_latency'] = network_time
+            metrics['solver_only_runtime'] = qpu_access_time
 
         return {
             'weights': final_weights,
@@ -964,3 +995,4 @@ class DiscreteLevelsOptimizerWrapper:
             Dictionary with 'weights' and 'metrics'
         """
         return self.optimizer.optimize(returns)
+
