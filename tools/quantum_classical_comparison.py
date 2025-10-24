@@ -39,6 +39,7 @@ from qpo.optimizers.risk_parity import RiskParityOptimizer
 from qpo.optimizers.regularized import L1RegularizedOptimizer, L2RegularizedOptimizer
 from qpo.optimizers.backtest import Backtester
 from qpo.utils.data_prep import load_portfolio_data as load_portfolio_data_util
+from qpo.utils.topology_selection import select_optimal_template
 from clustering import (
     CorrelationClusterer, AntiCorrelationClusterer, GraphClusterer, SectorClusterer,
     CovarianceClusterer, ReturnsClusterer, VolatilityClusterer,
@@ -270,22 +271,60 @@ def create_optimizers(
     if should_include('quantum'):
         print("\nConfiguring Quantum Optimizers...")
 
+        # Auto-select optimal template if returns DataFrame is provided
+        template_params = None
+        if returns is not None:
+            num_assets = len(returns.columns)
+            print(f"  Auto-selecting template for {num_assets} assets...")
+
+            template = select_optimal_template(num_assets)
+            if template:
+                print(f"  ✓ Selected template: {template['template_name']}")
+                print(f"    - Clusters: {template['cluster_size']}, Assets/cluster: {template['assets_per_cluster']}")
+                print(f"    - Levels: {template['num_levels']}, Capacity: {template['capacity']}, Waste: {template['waste']}")
+
+                template_params = {
+                    'n_levels': template['num_levels'],
+                    'max_cluster_size': template['assets_per_cluster'],
+                    'expected_assets_per_cluster': template['assets_per_cluster'],
+                    'expected_n_clusters': template['cluster_size'],
+                    'auto_select_template': False,
+                }
+            else:
+                print(f"  ⚠ No suitable template found, using fallback parameters")
+                template_params = {
+                    'n_levels': 6,
+                    'max_cluster_size': max_cluster_size,
+                    'auto_select_template': True,
+                }
+
         for solver_type in solver_types:
             for clustering_method in clustering_methods:
                 try:
                     clusterer = create_clusterer(clustering_method)
 
-                    # Use DiscreteLevelsOptimizer with k_spread parameter
-                    quantum_opt = DiscreteLevelsOptimizer(
-                        n_levels=6,
-                        alpha=10,
-                        beta=2,
-                        solver_type=solver_type,
-                        clusterer=clusterer,
-                        max_cluster_size=max_cluster_size,
-                        l1_sparsity_penalty=6.0,
-                        use_thermometer_cutoff=True
-                    )
+                    # Base parameters
+                    opt_params = {
+                        'alpha': 10,
+                        'beta': 2,
+                        'solver_type': solver_type,
+                        'clusterer': clusterer,
+                        'l1_sparsity_penalty': 5.0,
+                        'use_thermometer_cutoff': True,
+                    }
+
+                    # Add template parameters if available
+                    if template_params:
+                        opt_params.update(template_params)
+                    else:
+                        # Fallback if no returns provided
+                        opt_params.update({
+                            'n_levels': 6,
+                            'max_cluster_size': max_cluster_size,
+                            'auto_select_template': True,
+                        })
+
+                    quantum_opt = DiscreteLevelsOptimizer(**opt_params)
 
                     name = f"Quantum ({solver_type.upper()}, {clustering_method.capitalize()})"
 

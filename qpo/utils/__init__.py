@@ -16,3 +16,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """Utility functions for qpo."""
+
+from .topology_selection import (
+    select_optimal_template,
+    get_template_parameters_for_optimizer
+)
+
+__all__ = [
+    'select_optimal_template',
+    'get_template_parameters_for_optimizer',
+]
