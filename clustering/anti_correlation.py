@@ -82,6 +82,9 @@ class AntiCorrelationClusterer(BaseClusterer):
         # Compute correlation matrix
         corr = returns.corr()
 
+        # Replace NaN values with 0 (treat as uncorrelated if insufficient data)
+        corr = corr.fillna(0)
+
         # Distance: 1 + correlation
         # This creates an INVERTED similarity measure:
         #   - Negative correlation → small distance → cluster together

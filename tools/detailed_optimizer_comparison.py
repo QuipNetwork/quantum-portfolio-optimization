@@ -168,28 +168,13 @@ class DetailedOptimizerComparison:
         if qpu_params is None:
             qpu_params = {}
 
-        # Auto-select template based on portfolio size
+        # Use auto-select template (no manual selection needed)
         num_assets = len(train_returns.columns)
-        print(f"\n📐 Auto-selecting template for {num_assets} assets...")
+        print(f"\n📐 Will auto-select template for {num_assets} assets during optimization...")
 
-        template = select_optimal_template(num_assets)
-        if template:
-            print(f"  ✓ Selected template: {template['template_name']}")
-            print(f"    - Clusters: {template['cluster_size']}, Assets/cluster: {template['assets_per_cluster']}")
-            print(f"    - Levels: {template['num_levels']}, Capacity: {template['capacity']}, Waste: {template['waste']}")
-
-            n_levels = template['num_levels']
-            max_cluster_size = template['assets_per_cluster']
-            expected_assets_per_cluster = template['assets_per_cluster']
-            expected_n_clusters = template['cluster_size']
-            auto_select_template = False
-        else:
-            print(f"  ⚠ No suitable template found, using fallback parameters")
-            n_levels = qpu_params.get('n_levels', 6)
-            max_cluster_size = qpu_params.get('max_cluster_size', 16)
-            expected_assets_per_cluster = None
-            expected_n_clusters = None
-            auto_select_template = True
+        n_levels = qpu_params.get('n_levels', 8)
+        max_cluster_size = qpu_params.get('max_cluster_size', 16)
+        auto_select_template = True  # Let the optimizer auto-select
 
         alpha = qpu_params.get('alpha', 10.0)
         beta = qpu_params.get('beta', 2.0)
@@ -226,8 +211,6 @@ class DetailedOptimizerComparison:
             solver_type=qpu_solver,
             clusterer=clusterer,
             max_cluster_size=max_cluster_size,
-            expected_assets_per_cluster=expected_assets_per_cluster,
-            expected_n_clusters=expected_n_clusters,
             auto_select_template=auto_select_template,
             l1_sparsity_penalty=qpu_params.get('l1_sparsity_penalty', 2.0),
             use_thermometer_cutoff=qpu_params.get('use_thermometer_cutoff', True)
@@ -339,28 +322,12 @@ class DetailedOptimizerComparison:
         if qpu_params is None:
             qpu_params = {}
 
-        # Auto-select template based on portfolio size
+        # Use auto-select template (no manual selection needed)
         num_assets = len(self.returns.columns)
-        print(f"\nAuto-selecting template for {num_assets} assets...")
+        print(f"\nWill auto-select template for {num_assets} assets during optimization...")
 
-        template = select_optimal_template(num_assets)
-        if template:
-            print(f"  ✓ Selected template: {template['template_name']}")
-            print(f"    - Clusters: {template['cluster_size']}, Assets/cluster: {template['assets_per_cluster']}")
-            print(f"    - Levels: {template['num_levels']}, Capacity: {template['capacity']}, Waste: {template['waste']}")
-
-            n_levels = template['num_levels']
-            max_cluster_size = template['assets_per_cluster']
-            expected_assets_per_cluster = template['assets_per_cluster']
-            expected_n_clusters = template['cluster_size']
-            auto_select_template = False
-        else:
-            print(f"  ⚠ No suitable template found, using fallback parameters")
-            n_levels = qpu_params.get('n_levels', 6)
-            max_cluster_size = qpu_params.get('max_cluster_size', 16)
-            expected_assets_per_cluster = None
-            expected_n_clusters = None
-            auto_select_template = True
+        n_levels = qpu_params.get('n_levels', 8)
+        max_cluster_size = qpu_params.get('max_cluster_size', 16)
 
         # Create optimizers
         mv_optimizer = ClassicalOptimizer(gamma=1.0, method='cvxpy')
@@ -373,9 +340,7 @@ class DetailedOptimizerComparison:
             solver_type=qpu_solver,
             clusterer=UniformClusterer(max_cluster_size=max_cluster_size, target_cluster_size=max_cluster_size//2),
             max_cluster_size=max_cluster_size,
-            expected_assets_per_cluster=expected_assets_per_cluster,
-            expected_n_clusters=expected_n_clusters,
-            auto_select_template=auto_select_template,
+            auto_select_template=True,  # Let the optimizer auto-select
             l1_sparsity_penalty=qpu_params.get('l1_sparsity_penalty', 2.0),
             use_thermometer_cutoff=qpu_params.get('use_thermometer_cutoff', True)
         )

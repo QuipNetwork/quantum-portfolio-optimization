@@ -19,11 +19,24 @@
 
 import sys
 import time
+import warnings
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Any
 from dotenv import load_dotenv
+
+# Suppress D-Wave SA warnings about zero-energy BQMs (occurs with degenerate clusters)
+warnings.filterwarnings('ignore', message='All bqm biases are zero')
+warnings.filterwarnings('ignore', message='.*Temperature range is set arbitrarily.*')
+warnings.filterwarnings('ignore', message='.*Metropolis-Hastings update is non-ergodic.*')
+
+# Suppress numpy warnings for insufficient data (empty slices, division by zero in covariance)
+warnings.filterwarnings('ignore', message='Mean of empty slice')
+warnings.filterwarnings('ignore', message='invalid value encountered in divide')
+warnings.filterwarnings('ignore', message='Degrees of freedom <= 0 for slice')
+warnings.filterwarnings('ignore', message='divide by zero encountered in divide')
+warnings.filterwarnings('ignore', message='invalid value encountered in multiply')
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -251,7 +264,9 @@ def create_optimizers(
         elif method == 'uniform':
             return UniformClusterer(**common_args)
         elif method == 'graph':
-            return GraphClusterer(**common_args)
+            # Lower correlation threshold to ensure enough edges in the graph
+            # Default 0.5 is too high for many portfolios, causing isolated nodes
+            return GraphClusterer(**common_args, correlation_threshold=0.3)
         elif method == 'sector':
             return SectorClusterer(**common_args, sector_map=portfolio_info_csv)
         elif method == 'covariance':
@@ -271,52 +286,29 @@ def create_optimizers(
     if should_include('quantum'):
         print("\nConfiguring Quantum Optimizers...")
 
-        # Auto-select optimal template if returns DataFrame is provided
-        template_params = None
-        if returns is not None:
-            num_assets = len(returns.columns)
-            print(f"  Auto-selecting template for {num_assets} assets...")
-
-            template = select_optimal_template(num_assets)
-            if template:
-                print(f"  ✓ Selected template: {template['template_name']}")
-                print(f"    - Clusters: {template['cluster_size']}, Assets/cluster: {template['assets_per_cluster']}")
-                print(f"    - Levels: {template['num_levels']}, Capacity: {template['capacity']}, Waste: {template['waste']}")
-
-                template_params = {
-                    'n_levels': template['num_levels'],
-                    'max_cluster_size': template['assets_per_cluster'],
-                    'expected_assets_per_cluster': template['assets_per_cluster'],
-                    'expected_n_clusters': template['cluster_size'],
-                    'auto_select_template': False,
-                }
-            else:
-                print(f"  ⚠ No suitable template found, using fallback parameters")
-                template_params = {
-                    'n_levels': 6,
-                    'max_cluster_size': max_cluster_size,
-                    'auto_select_template': True,
-                }
-
         for solver_type in solver_types:
             for clustering_method in clustering_methods:
                 try:
                     clusterer = create_clusterer(clustering_method)
 
-                    # Base parameters
+                    # Base parameters with auto-select enabled
+                    # The DiscreteLevelsOptimizer will automatically select
+                    # the best template based on portfolio size
                     opt_params = {
-                        'alpha': 10,
+                        'alpha': 20,
                         'beta': 2,
+                        'thermometer_penalty': 20.0,
                         'solver_type': solver_type,
                         'clusterer': clusterer,
-                        'l1_sparsity_penalty': 5.0,
+                        'l1_sparsity_penalty': 1.0,
                         'use_thermometer_cutoff': True,
+                        'max_cluster_size': max_cluster_size,
+                        'auto_select_template': True,  # Enable auto-selection
+                        'num_reads': 8192,  # Number of reads per solve
+                        'num_sweeps': 4096,  # Number of sweeps for SA (higher = better quality)
                     }
 
-                    # Add template parameters if available
-                    if template_params:
-                        opt_params.update(template_params)
-                    else:
+                    if False:
                         # Fallback if no returns provided
                         opt_params.update({
                             'n_levels': 6,

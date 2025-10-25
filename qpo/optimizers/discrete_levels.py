@@ -18,6 +18,7 @@
 """Discrete levels optimizer wrapper for backtesting compatibility."""
 
 import time
+import logging
 import numpy as np
 import pandas as pd
 from typing import Optional, Any, Dict, List, Tuple
@@ -34,6 +35,8 @@ from qpo.utils.constants import (
     DEFAULT_MAX_CLUSTER_SIZE
 )
 from clustering import SectorClusterer
+
+logger = logging.getLogger(__name__)
 
 
 class DiscreteLevelsOptimizer:
@@ -52,14 +55,14 @@ class DiscreteLevelsOptimizer:
                  solver_type: str = 'simulated',
                  num_reads: Optional[int] = None,
                  num_sweeps: Optional[int] = None,
+                 annealing_time: Optional[float] = None,
                  max_cluster_size: int = DEFAULT_MAX_CLUSTER_SIZE,
                  portfolio_info_csv: str = "portfolio-info.csv",
                  clusterer: Optional[Any] = None,
                  expected_assets_per_cluster: Optional[int] = None,
                  expected_n_clusters: Optional[int] = None,
                  auto_select_template: bool = True,
-                 k_spread: float = 0.0,
-                 l1_sparsity_penalty: float = 0.0,
+                 l1_sparsity_penalty: float = 1.0,
                  use_thermometer_cutoff: bool = False):
         """
         Initialize discrete levels optimizer.
@@ -72,13 +75,13 @@ class DiscreteLevelsOptimizer:
             solver_type: 'simulated' or 'qpu'
             num_reads: Number of annealing samples (default: 256 for SA, 10 for QPU)
             num_sweeps: Sweeps for simulated annealing (default 256, ignored for QPU)
+            annealing_time: Annealing time in microseconds for QPU (default: 20, min: 0.5, max: 2000)
             max_cluster_size: Maximum assets per cluster (19 for native embedding)
             portfolio_info_csv: Path to portfolio info for sector data
             clusterer: Custom clusterer (default: SectorClusterer)
             expected_assets_per_cluster: For QPU with templates, pad clusters to this size
             expected_n_clusters: For QPU with templates, pad to this many clusters
             auto_select_template: Automatically select best template for portfolio size
-            k_spread: Concentration parameter (0.0=no spread, 1.0-3.0=moderate spread)
             l1_sparsity_penalty: L1 regularization penalty (λ > 0 promotes sparsity, try 0.01-1.0)
                                 Adds +λ·||w||₁ to objective → fewer holdings
             use_thermometer_cutoff: If True, keep only assets with maximum thermometer level
@@ -88,21 +91,24 @@ class DiscreteLevelsOptimizer:
         self.beta = beta
         self.thermometer_penalty = thermometer_penalty
         self.solver_type = solver_type
-        self.k_spread = k_spread
         self.l1_sparsity_penalty = l1_sparsity_penalty
         self.use_thermometer_cutoff = use_thermometer_cutoff
 
         # Set num_reads based on solver type if not specified
         if num_reads is None:
-            self.num_reads = 10 if solver_type == 'qpu' else 256
+            self.num_reads = 10 if solver_type == 'qpu' else 512
         else:
             self.num_reads = num_reads
 
         # Set num_sweeps based on solver type if not specified
         if num_sweeps is None:
-            self.num_sweeps = 256 if solver_type == 'simulated' else 0
+            self.num_sweeps = 512 if solver_type == 'simulated' else 0
         else:
             self.num_sweeps = num_sweeps
+
+        # Set annealing time (QPU only, in microseconds)
+        self.annealing_time = annealing_time if annealing_time is not None else 5.0
+
         self.max_cluster_size = max_cluster_size
         self.portfolio_info_csv = portfolio_info_csv
         self.expected_assets_per_cluster = expected_assets_per_cluster
@@ -188,7 +194,8 @@ class DiscreteLevelsOptimizer:
 
                     padded_clusters[empty_cluster_id] = empty_cluster
 
-        # Extend mu with zeros for dummy assets
+        # Extend mu with small negative returns for dummy assets
+        # This ensures they won't be selected AND prevents all-zero BQMs
         all_tickers = []
         for tickers in padded_clusters.values():
             all_tickers.extend(tickers)
@@ -197,7 +204,8 @@ class DiscreteLevelsOptimizer:
 
         padded_mu = mu.copy()
         for dummy in dummy_tickers:
-            padded_mu[dummy] = 0.0  # Zero expected return
+            # Small negative return: actively discouraged but prevents zero BQM
+            padded_mu[dummy] = -1e-6  # Tiny penalty
 
         # Extend Sigma with zeros for dummy assets
         # Build dummy covariance matrix efficiently (avoid fragmentation)
@@ -233,6 +241,94 @@ class DiscreteLevelsOptimizer:
             padded_Sigma = Sigma.copy()
 
         return padded_clusters, padded_mu, padded_Sigma, real_tickers
+
+    def _relabel_bqm_for_template(
+        self,
+        unified_bqm: dimod.BinaryQuadraticModel,
+        cluster_info: List[Dict]
+    ) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """
+        Relabel BQM variables from ticker-based names to template format.
+
+        BQM uses: TICKER_LEVEL (e.g., "ZTS_5") + CLUSTER_ID_LEVEL for meta-cluster
+        Template uses: C{cluster_idx}_ASSET_{asset_idx}_{level} + META_{cluster_idx}_{level}
+
+        Args:
+            unified_bqm: BQM with ticker-based variable names
+            cluster_info: List of cluster metadata dicts
+
+        Returns:
+            (relabeling dict, reverse_relabeling dict)
+        """
+        # Build mapping: ticker → (cluster_idx, asset_idx_within_cluster)
+        # and cluster_id → cluster_idx
+        ticker_to_location = {}
+        cluster_id_to_idx = {}
+
+        # Process asset clusters (exclude META_CLUSTER)
+        asset_clusters = [c for c in cluster_info if c['id'] != 'META_CLUSTER']
+        for cluster_idx, cluster_data in enumerate(asset_clusters):
+            cluster_id = cluster_data['id']
+            tickers = cluster_data['tickers']
+            cluster_id_to_idx[cluster_id] = cluster_idx
+            for asset_idx, ticker in enumerate(tickers):
+                ticker_to_location[ticker] = (cluster_idx, asset_idx)
+
+        # Relabel BQM variables
+        relabeling = {}
+        for var in unified_bqm.variables:
+            # Debug CSCO specifically
+            if var.startswith('CSCO'):
+                logger.debug(f"DEBUG: Processing variable {var}")
+                logger.debug(f"  CSCO in ticker_to_location: {'CSCO' in ticker_to_location}")
+                if 'CSCO' in ticker_to_location:
+                    logger.debug(f"  CSCO location: {ticker_to_location['CSCO']}")
+                logger.debug(f"  cluster_ids: {list(cluster_id_to_idx.keys())}")
+
+            # Check if it's a meta-cluster variable (cluster_id with level)
+            is_meta = False
+            for cluster_id in cluster_id_to_idx.keys():
+                if var.startswith(str(cluster_id) + '_') and var.split('_')[-1].isdigit():
+                    # Found meta-cluster variable: cluster_id_level → META_cluster_idx_level
+                    level = var.split('_')[-1]
+                    cluster_idx = cluster_id_to_idx[cluster_id]
+                    template_var = f"META_{cluster_idx}_{level}"
+                    relabeling[var] = template_var
+                    is_meta = True
+
+                    if var.startswith('CSCO'):
+                        logger.debug(f"  DEBUG: CSCO matched as meta-cluster! cluster_id={cluster_id}")
+                    break
+
+            if not is_meta:
+                # Asset variable: TICKER_LEVEL → C{cluster_idx}_ASSET_{asset_idx}_{level}
+                # Important: Tickers can have underscores (e.g., _DUMMY_37), so we must
+                # check all possible tickers in our mapping to find the right split point
+                mapped = False
+                for ticker in ticker_to_location.keys():
+                    if var.startswith(ticker + '_'):
+                        # Found matching ticker, extract level
+                        level_str = var[len(ticker) + 1:]  # +1 for underscore
+                        if level_str.isdigit():
+                            cluster_idx, asset_idx = ticker_to_location[ticker]
+                            template_var = f"C{cluster_idx}_ASSET_{asset_idx}_{level_str}"
+                            relabeling[var] = template_var
+                            mapped = True
+
+                            if var.startswith('CSCO'):
+                                logger.debug(f"  DEBUG: CSCO mapped as asset! ticker={ticker}, template_var={template_var}")
+                            break
+
+                if not mapped:
+                    # Keep as is if not found
+                    if var.startswith('CSCO'):
+                        logger.debug(f"  DEBUG: CSCO NOT MAPPED - keeping as {var}")
+                    relabeling[var] = var
+
+        # Create reverse mapping for decoding solution
+        reverse_relabeling = {v: k for k, v in relabeling.items()}
+
+        return relabeling, reverse_relabeling
 
     def _validate_and_fix_bqm_topology(self, bqm: dimod.BinaryQuadraticModel, cluster_info: list, embedding: dict) -> dimod.BinaryQuadraticModel:
         """
@@ -527,33 +623,6 @@ class DiscreteLevelsOptimizer:
 
         return final_weights
 
-    def _apply_k_spread(self, weights: pd.Series) -> pd.Series:
-        """
-        Apply k-based spread to weights using power function.
-
-        Applied ONLY to meta-cluster weights.
-
-        Args:
-            weights: Return-adjusted weights
-
-        Returns:
-            Spread-adjusted weights
-        """
-        if self.k_spread <= 0:
-            return weights
-
-        # Apply k-based spread: w' = w^(1+k)
-        spread_power = 1 + self.k_spread
-        spread_weights = weights ** spread_power
-
-        # Normalize
-        if spread_weights.sum() > 0:
-            final_weights = spread_weights / spread_weights.sum()
-        else:
-            final_weights = weights
-
-        return final_weights
-
     def _apply_thermometer_cutoff(self, weights: pd.Series) -> pd.Series:
         """
         Keep only assets with maximum (or near-maximum) thermometer level.
@@ -705,14 +774,7 @@ class DiscreteLevelsOptimizer:
         Returns:
             Tuple of (best_sample, runtime, qpu_access_time, network_time)
         """
-        from dwave.system import FixedEmbeddingComposite
-
-        # Load template embedding
-        combined_embedding = self.embedding_mgr.get_full_portfolio_embedding(
-            cluster_info, self.n_levels
-        )
-
-        # Get base sampler based on solver type
+        # Get base sampler and handle embedding based on solver type
         if self.solver_type == 'qpu':
             # Initialize QPU sampler if needed
             if self._qpu_sampler is None:
@@ -721,28 +783,135 @@ class DiscreteLevelsOptimizer:
                 solver_name = os.environ.get('DWAVE_API_SOLVER', 'Advantage2_system1.6')
                 self._qpu_sampler = DWaveSampler(solver=solver_name)
             base_sampler = self._qpu_sampler
+
+            # Use FixedEmbeddingComposite with templates for QPU
+            if self.expected_assets_per_cluster is not None:
+                from dwave.system import FixedEmbeddingComposite
+                # Load template embedding with expected dimensions
+                combined_embedding = self.embedding_mgr.get_full_portfolio_embedding(
+                    cluster_info,
+                    self.n_levels,
+                    self.expected_assets_per_cluster,
+                    self.expected_n_clusters
+                )
+
+                # Relabel BQM variables from ticker names to template format
+                # (e.g., CSCO_1 -> C0_ASSET_5_1, cluster_1_6 -> META_1_6)
+                relabeling, reverse_relabeling = self._relabel_bqm_for_template(
+                    combined_bqm, cluster_info
+                )
+                combined_bqm = combined_bqm.relabel_variables(relabeling, inplace=False)
+
+                # Store reverse relabeling for decoding solution later
+                self._reverse_relabeling = reverse_relabeling
+
+                # Pad BQM with missing template variables (set to 0)
+                # The template expects all variables even if not used by actual portfolio
+                template_vars = set(combined_embedding.keys())
+                bqm_vars = set(combined_bqm.variables)
+                missing_vars = template_vars - bqm_vars
+
+                if missing_vars:
+                    # Add missing variables with zero bias (no contribution to objective)
+                    for var in missing_vars:
+                        combined_bqm.add_variable(var, 0.0)
+
+                # Remove any extra variables not in template (shouldn't happen but be safe)
+                extra_vars = bqm_vars - template_vars
+                if extra_vars:
+                    for var in extra_vars:
+                        combined_bqm.remove_variable(var)
+
+                # Final validation
+                if set(combined_bqm.variables) != template_vars:
+                    raise ValueError(
+                        f"BQM variable mismatch after padding!\n"
+                        f"Expected: {len(template_vars)} variables\n"
+                        f"Got: {len(combined_bqm.variables)} variables"
+                    )
+
+                sampler = FixedEmbeddingComposite(base_sampler, combined_embedding)
+            else:
+                # Without templates, use auto-embedding for QPU
+                from dwave.system import EmbeddingComposite
+                sampler = EmbeddingComposite(base_sampler)
+
         else:  # simulated annealing
-            from neal import SimulatedAnnealingSampler
+            from dwave.samplers import SimulatedAnnealingSampler
             base_sampler = SimulatedAnnealingSampler()
 
-        # Create fixed embedding composite (works for both QPU and SA)
-        sampler = FixedEmbeddingComposite(base_sampler, combined_embedding)
+            # For SA with templates, relabel and validate BQM structure
+            # SA is unstructured and doesn't need qubit mapping, but we must ensure
+            # the problem structure is identical to what QPU would solve
+            if self.expected_assets_per_cluster is not None:
+                # Load template to validate BQM structure matches expected dimensions
+                combined_embedding = self.embedding_mgr.get_full_portfolio_embedding(
+                    cluster_info,
+                    self.n_levels,
+                    self.expected_assets_per_cluster,
+                    self.expected_n_clusters
+                )
+
+                # Relabel BQM variables from ticker names to template format
+                # (e.g., ZTS_5 -> C0_ASSET_5_5, cluster_1_6 -> META_1_6)
+                relabeling, reverse_relabeling = self._relabel_bqm_for_template(
+                    combined_bqm, cluster_info
+                )
+                combined_bqm = combined_bqm.relabel_variables(relabeling, inplace=False)
+
+                # Store reverse relabeling for decoding solution later
+                self._reverse_relabeling = reverse_relabeling
+
+                # Pad BQM with missing template variables (set to 0)
+                # The template expects all variables even if not used by actual portfolio
+                template_vars = set(combined_embedding.keys())
+                bqm_vars = set(combined_bqm.variables)
+                missing_vars = template_vars - bqm_vars
+
+                if missing_vars:
+                    # Add missing variables with zero bias (no contribution to objective)
+                    for var in missing_vars:
+                        combined_bqm.add_variable(var, 0.0)
+
+                # Remove any extra variables not in template (shouldn't happen but be safe)
+                extra_vars = bqm_vars - template_vars
+                if extra_vars:
+                    for var in extra_vars:
+                        combined_bqm.remove_variable(var)
+
+                # Final validation
+                if set(combined_bqm.variables) != template_vars:
+                    raise ValueError(
+                        f"BQM variable mismatch after padding!\n"
+                        f"Expected: {len(template_vars)} variables\n"
+                        f"Got: {len(combined_bqm.variables)} variables"
+                    )
+
+            # Use base sampler directly (SA doesn't need embedding)
+            sampler = base_sampler
 
         # Solve
         start_solve = time.time()
-        response = sampler.sample(
-            combined_bqm,
-            num_reads=self.num_reads,
-            num_sweeps=self.num_sweeps if self.solver_type == 'simulated' else None
-        )
+        if self.solver_type == 'qpu':
+            response = sampler.sample(
+                combined_bqm,
+                num_reads=10,
+                annealing_time=self.annealing_time
+            )
+        else:
+            response = sampler.sample(
+                combined_bqm,
+                num_reads=self.num_reads,
+                num_sweeps=self.num_sweeps
+            )
         solve_time = time.time() - start_solve
 
         # Extract timing info (QPU only)
         qpu_access_time = 0.0
         network_time = 0.0
         if self.solver_type == 'qpu' and hasattr(response, 'info'):
-            qpu_access_time = response.info.get('timing', {}).get('qpu_access_time', 0.0) / 1000.0  # Convert to ms
-            network_time = solve_time - (qpu_access_time / 1000.0)  # Approximate network time
+            qpu_access_time = response.info.get('timing', {}).get('qpu_access_time', 0.0) / 1_000_000.0  # Convert µs to seconds
+            network_time = solve_time - qpu_access_time  # Approximate network time
 
         return response.first.sample, solve_time, qpu_access_time, network_time
 
@@ -781,8 +950,8 @@ class DiscreteLevelsOptimizer:
             )
 
             if cluster_id == 'META_CLUSTER':
-                # Apply k-spread ONLY to meta-cluster
-                meta_cluster_weights = self._apply_k_spread(return_adjusted_weights)
+                # Meta-cluster: save weights for cluster allocation
+                meta_cluster_weights = return_adjusted_weights
             else:
                 # Asset clusters: apply thermometer cutoff per-cluster (if enabled)
                 if self.use_thermometer_cutoff:
@@ -848,10 +1017,16 @@ class DiscreteLevelsOptimizer:
 
     def _auto_select_template(self, clusters: Dict[str, List[str]]) -> None:
         """
-        Auto-select the best-fitting template based on cluster structure.
+        Auto-select the best-fitting template based on total portfolio size.
 
-        Updates self.expected_n_clusters and self.expected_assets_per_cluster
-        with the smallest template that can accommodate all clusters.
+        Strategy:
+        1. Calculate total assets needed (sum of all cluster sizes)
+        2. Find templates where num_clusters × assets_per_cluster ≥ total_assets
+        3. Prefer templates with the largest 'l' (levels) that fits
+        4. Among same 'l', pick template with least waste
+
+        Updates self.expected_n_clusters, self.expected_assets_per_cluster, and self.n_levels.
+        Raises FileNotFoundError if no suitable template exists.
 
         Args:
             clusters: Dictionary mapping cluster_id -> list of ticker symbols
@@ -859,44 +1034,113 @@ class DiscreteLevelsOptimizer:
         if not self.auto_select_template or self.expected_assets_per_cluster is not None:
             return  # Already manually specified or auto-select disabled
 
-        # Find actual portfolio dimensions
-        n_actual_clusters = len(clusters)
-        max_actual_assets = max(len(tickers) for tickers in clusters.values())
+        # Calculate total assets needed
+        total_assets = sum(len(tickers) for tickers in clusters.values())
+        n_clusters = len(clusters)
 
-        # Find available templates
+        # Find all available templates (any level)
         import glob
         from pathlib import Path
         template_dir = Path(__file__).parent.parent.parent / 'embeddings' / 'templates'
-        available_templates = glob.glob(str(template_dir / f'portfolio_*c_*a_{self.n_levels}l.json'))
+        all_templates = glob.glob(str(template_dir / 'portfolio_*c_*a_*l.json'))
 
-        if not available_templates:
-            return  # No templates available
+        if not all_templates:
+            raise FileNotFoundError(
+                f"No templates found in {template_dir}.\n"
+                f"Portfolio requires: {total_assets} total assets across {n_clusters} clusters\n"
+                f"Solutions:\n"
+                f"  1. Generate templates\n"
+                f"  2. Set auto_select_template=False to disable template usage"
+            )
 
-        # Parse template dimensions and find best fit
-        best_template = None
-        best_waste = float('inf')
+        # Parse all templates and group by level
+        templates_by_level = {}  # level -> list of (clusters, assets, capacity, waste, fname)
 
-        for template_path in available_templates:
+        for template_path in all_templates:
             fname = Path(template_path).stem  # e.g., "portfolio_12c_16a_6l"
             parts = fname.split('_')
             if len(parts) >= 3:
                 template_clusters = int(parts[1].rstrip('c'))
                 template_assets = int(parts[2].rstrip('a'))
+                template_levels = int(parts[3].rstrip('l'))
+
+                # Calculate capacity and waste
+                capacity = template_clusters * template_assets
 
                 # Check if this template can fit our portfolio
-                if template_clusters >= n_actual_clusters and template_assets >= max_actual_assets:
-                    # Calculate "waste" (excess capacity)
-                    waste = (template_clusters - n_actual_clusters) * template_assets + \
-                            (template_assets - max_actual_assets) * n_actual_clusters
+                if capacity >= total_assets:
+                    waste = capacity - total_assets
 
-                    if waste < best_waste:
-                        best_waste = waste
-                        best_template = (template_clusters, template_assets)
+                    if template_levels not in templates_by_level:
+                        templates_by_level[template_levels] = []
+
+                    templates_by_level[template_levels].append(
+                        (template_clusters, template_assets, capacity, waste, fname)
+                    )
+
+        if not templates_by_level:
+            # No suitable templates found
+            available_str = "\n  ".join(
+                f"{Path(p).stem}" for p in sorted(all_templates)[:10]
+            )
+            raise FileNotFoundError(
+                f"No suitable template found for portfolio size.\n"
+                f"Portfolio requires: {total_assets} total assets across {n_clusters} clusters\n"
+                f"Available templates (showing first 10):\n  {available_str}\n"
+                f"Solutions:\n"
+                f"  1. Reduce max_cluster_size to create smaller clusters\n"
+                f"  2. Generate a larger template\n"
+                f"  3. Set auto_select_template=False to disable template usage"
+            )
+
+        # Select template with largest 'l' (prefer more levels), then least waste
+        best_template = None
+        best_level = 0
+        best_waste = float('inf')
+
+        # Iterate through levels in descending order (largest 'l' first)
+        for level in sorted(templates_by_level.keys(), reverse=True):
+            candidates = templates_by_level[level]
+            # Sort by waste (ascending) to find best candidate for this level
+            candidates.sort(key=lambda x: x[3])
+
+            # Pick the one with least waste for this level
+            template_clusters, template_assets, capacity, waste, fname = candidates[0]
+
+            # Always prefer larger 'l', regardless of waste
+            # (Larger l = more granular weight selection)
+            if level > best_level:
+                best_template = (template_clusters, template_assets, level, fname)
+                best_level = level
+                best_waste = waste
+            elif level == best_level and waste < best_waste:
+                # Same level, pick the one with less waste
+                best_template = (template_clusters, template_assets, level, fname)
+                best_waste = waste
 
         if best_template:
-            self.expected_n_clusters, self.expected_assets_per_cluster = best_template
+            self.expected_n_clusters, self.expected_assets_per_cluster, actual_levels, fname = best_template
+
+            # Update n_levels if we had to use a different one
+            if actual_levels != self.n_levels:
+                print(f"NOTE: Requested {self.n_levels} levels, but using {actual_levels} levels "
+                      f"(largest available for portfolio size).")
+                self.n_levels = actual_levels
+
+                # Update formulator with new n_levels
+                from qpo.qubo.discrete_levels import DiscreteLevelFormulator
+                self.formulator = DiscreteLevelFormulator(
+                    n_levels=actual_levels,
+                    alpha=self.alpha,
+                    beta=self.beta,
+                    thermometer_penalty=self.thermometer_penalty,
+                    l1_sparsity_penalty=self.l1_sparsity_penalty
+                )
+
+            capacity = self.expected_n_clusters * self.expected_assets_per_cluster
             print(f"Auto-selected template: {self.expected_n_clusters}c × "
-                  f"{self.expected_assets_per_cluster}a × {self.n_levels}l")
+                  f"{self.expected_assets_per_cluster}a × {actual_levels}l "
+                  f"(capacity: {capacity}, needed: {total_assets})")
 
     def optimize(self, returns: pd.DataFrame) -> dict:
         """
@@ -968,9 +1212,9 @@ class DiscreteLevelsOptimizer:
 
         # Add QPU-specific timing if available
         if self.solver_type == 'qpu' and qpu_access_time > 0:
-            metrics['qpu_access_time'] = qpu_access_time  # Already in seconds
-            metrics['network_latency'] = network_time
-            metrics['solver_only_runtime'] = qpu_access_time
+            metrics['qpu_access_time'] = qpu_access_time  # In seconds
+            metrics['network_latency'] = network_time  # In seconds
+            metrics['solver_only_runtime'] = qpu_access_time  # In seconds
 
         return {
             'weights': final_weights,

@@ -66,7 +66,7 @@ DEFAULT_ALPHA = 10.0
 DEFAULT_BETA = 2.0
 """Default risk coefficient in QUBO formulation."""
 
-DEFAULT_THERMOMETER_PENALTY = 10.0
+DEFAULT_THERMOMETER_PENALTY = 20.0
 """Default penalty for thermometer encoding constraint violations."""
 
 DEFAULT_N_BITS = 8

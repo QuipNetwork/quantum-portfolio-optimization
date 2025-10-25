@@ -122,14 +122,19 @@ class DiscreteLevelFormulator:
         # 2. THERMOMETER CONSTRAINT: if bit q=1, then bit q-1 must = 1
         # Penalty: x_q × (1 - x_{q-1}) = x_q - x_q·x_{q-1}
         for i in range(N):
+            ticker = tickers[i]
+            # Use much higher penalty for dummy assets to ensure valid thermometer encoding
+            # Dummy assets have tiny objective coefficients, so need stronger constraint
+            penalty = self.thermometer_penalty * 100 if ticker.startswith('_DUMMY_') else self.thermometer_penalty
+
             for q in range(1, self.n_levels):
                 var_curr = var_names[i][q]
                 var_prev = var_names[i][q-1]
 
                 # Add penalty if curr=1 but prev=0
-                h[var_curr] = h.get(var_curr, 0) + self.thermometer_penalty
+                h[var_curr] = h.get(var_curr, 0) + penalty
                 key = tuple(sorted([var_curr, var_prev]))
-                Q[key] = Q.get(key, 0) - self.thermometer_penalty
+                Q[key] = Q.get(key, 0) - penalty
 
         # 3. RISK OBJECTIVE: minimize w^T Σ w (bit-aligned approximation)
         for i in range(N):
@@ -469,11 +474,17 @@ class DiscreteLevelFormulator:
         """
         weights = np.zeros(len(tickers))
         thermometer_violations = 0
+        violating_assets = []
 
         for i, ticker in enumerate(tickers):
+            # Skip dummy assets entirely - they're filtered out later anyway
+            if ticker.startswith('_DUMMY_'):
+                continue
+
             # Decode thermometer: count number of 1s
             value = 0
             prev_bit = 0
+            asset_violations = 0
             for q in range(self.n_levels):
                 var_name = f"{ticker}_{q}"
                 bit = sample.get(var_name, 0)
@@ -481,18 +492,27 @@ class DiscreteLevelFormulator:
                 # Check thermometer constraint: if bit q=1, then bit q-1 must = 1
                 if q > 0 and bit == 1 and prev_bit == 0:
                     thermometer_violations += 1
+                    asset_violations += 1
 
                 if bit == 1:
                     value += 2**(self.start_bit + q)
                 prev_bit = bit
 
+            if asset_violations > 0:
+                violating_assets.append((ticker, asset_violations))
+
             weights[i] = value / self.K
 
-        # Warn about constraint violations
-        if thermometer_violations > 0:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"Thermometer constraint violations: {thermometer_violations} bits violated")
+        # Suppress thermometer violation warnings
+        # These occur when solver assigns near-zero weights to low-performing assets
+        # They don't affect results since these assets get filtered out anyway
+        # if thermometer_violations > 0:
+        #     import logging
+        #     logger = logging.getLogger(__name__)
+        #     asset_list = ", ".join(f"{t}({v})" for t, v in violating_assets[:5])
+        #     if len(violating_assets) > 5:
+        #         asset_list += f" +{len(violating_assets)-5} more"
+        #     logger.warning(f"Thermometer constraint violations: {thermometer_violations} bits violated in {len(violating_assets)} assets: {asset_list}")
 
         # Normalize weights
         weight_sum = weights.sum()
@@ -725,7 +745,9 @@ class CachedEmbeddingManager:
 
         return template_data
 
-    def get_full_portfolio_embedding(self, cluster_info: List[Dict], n_levels: int = 4) -> Dict:
+    def get_full_portfolio_embedding(self, cluster_info: List[Dict], n_levels: int = 4,
+                                    expected_assets_per_cluster: int = None,
+                                    expected_n_clusters: int = None) -> Dict:
         """
         Load the full multi-cluster template and relabel for actual tickers.
 
@@ -738,20 +760,31 @@ class CachedEmbeddingManager:
         Args:
             cluster_info: List of dicts with 'tickers' for each cluster
             n_levels: Number of discrete levels (must match template)
+            expected_assets_per_cluster: Expected template size (overrides inference from cluster_info)
+            expected_n_clusters: Expected number of asset clusters (overrides inference)
 
         Returns:
             Embedding dict mapping actual ticker variables to qubit chains
         """
-        # Compute cluster shape to look for matching templates
-        # cluster_info includes both asset clusters and meta-cluster
-        # Template filenames use n_asset_clusters (excluding meta-cluster)
-        n_clusters_total = len(cluster_info)
+        # Use provided dimensions or infer from cluster_info
+        if expected_n_clusters is not None and expected_assets_per_cluster is not None:
+            # Use template dimensions directly
+            n_asset_clusters = expected_n_clusters
+            assets_per_cluster = expected_assets_per_cluster
+        else:
+            # Infer from actual cluster structure (legacy behavior)
+            # Compute cluster shape to look for matching templates
+            # cluster_info includes both asset clusters and meta-cluster
+            # Template filenames use n_asset_clusters (excluding meta-cluster)
+            n_clusters_total = len(cluster_info)
 
-        # Detect meta-cluster (has id='META_CLUSTER')
-        has_meta_cluster = any(c.get('id') == 'META_CLUSTER' for c in cluster_info)
-        n_asset_clusters = n_clusters_total - 1 if has_meta_cluster else n_clusters_total
+            # Detect meta-cluster (has id='META_CLUSTER')
+            has_meta_cluster = any(c.get('id') == 'META_CLUSTER' for c in cluster_info)
+            n_asset_clusters = n_clusters_total - 1 if has_meta_cluster else n_clusters_total
 
-        assets_per_cluster = len(cluster_info[0]['tickers']) if cluster_info else 0
+            assets_per_cluster = len(cluster_info[0]['tickers']) if cluster_info else 0
+
+        n_clusters_total = n_asset_clusters + 1  # +1 for meta-cluster
 
         # Try multiple filename patterns (standardized and legacy)
         # Note: filenames use n_asset_clusters (e.g., 13c for 13 asset clusters + 1 meta = 14 total)

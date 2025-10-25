@@ -76,7 +76,10 @@ class CovarianceClusterer(BaseClusterer):
             Distance matrix (N × N)
         """
         # Compute covariance matrix
-        cov = returns.cov().values
+        cov = returns.cov()
+
+        # Replace NaN values with 0 (treat as uncorrelated if insufficient data)
+        cov = cov.fillna(0).values
         n_assets = cov.shape[0]
 
         if self.distance_metric == 'euclidean':

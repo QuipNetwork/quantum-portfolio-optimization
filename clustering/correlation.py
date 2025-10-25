@@ -70,6 +70,9 @@ class CorrelationClusterer(BaseClusterer):
         # Compute correlation matrix
         corr = returns.corr()
 
+        # Replace NaN values with 0 (treat as uncorrelated if insufficient data)
+        corr = corr.fillna(0)
+
         # Distance: 1 - correlation
         if self.use_absolute:
             distance = 1 - corr.abs().values

@@ -36,7 +36,7 @@ class GraphClusterer(BaseClusterer):
     def __init__(self,
                  max_cluster_size: int = 18,
                  n_bits: int = 10,
-                 correlation_threshold: float = 0.5,
+                 correlation_threshold: float = 2.0,
                  algorithm: str = 'louvain',
                  target_cluster_size: int = None,
                  max_clusters: int = None,
@@ -91,6 +91,10 @@ class GraphClusterer(BaseClusterer):
 
         # Compute correlation matrix
         corr = returns.corr()
+
+        # Replace NaN values with 0 (treat as uncorrelated if insufficient data)
+        corr = corr.fillna(0)
+
         tickers = returns.columns.tolist()
 
         # Build graph
