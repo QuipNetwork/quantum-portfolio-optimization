@@ -204,7 +204,7 @@ class CQMPortfolioOptimizer:
         then solves with simulated annealing.
 
         Args:
-            num_reads: Number of annealing runs
+            num_reads: Number of annealing samples
             lagrange_multiplier: Penalty strength for constraints.
                 Defaults to 10x the largest bias in the objective.
             seed: Random seed for reproducibility

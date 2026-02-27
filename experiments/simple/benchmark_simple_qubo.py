@@ -28,6 +28,7 @@ from itertools import combinations
 from simple_portfolio_qubo import SimplePortfolioQUBO, get_example_assets, get_example_constraints
 from slack_portfolio_qubo import SlackPortfolioQUBO
 from cqm_portfolio import CQMPortfolioOptimizer
+from nl_portfolio import NLPortfolioOptimizer
 
 
 @dataclass
@@ -539,6 +540,35 @@ def run_benchmark(
             is_feasible=False
         ))
 
+    # 8. NL (Exact) - Brute-force via dwave-optimization model (small problems only)
+    if n <= 20:
+        start = time.perf_counter()
+        nl_constraints = {
+            'budget': budget,
+            'max_duration': max_duration,
+            'max_cardinality': max_cardinality,
+        }
+        nl_optimizer = NLPortfolioOptimizer(assets=assets, **nl_constraints)
+        nl_result = nl_optimizer.solve_exact()
+        nl_time = (time.perf_counter() - start) * 1000
+        nl_selection = [i for i, x in enumerate(nl_result['selection']) if x == 1]
+        results.append(make_result("NL (Exact)", nl_selection, nl_time, nl_result['energy']))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="NL (Exact)",
+            selected_assets=[],
+            total_score=0.0,
+            total_price=0.0,
+            total_duration=0.0,
+            num_selected=0,
+            energy=0.0,
+            runtime_ms=0.0,
+            budget_satisfied=False,
+            duration_satisfied=False,
+            cardinality_satisfied=False,
+            is_feasible=False
+        ))
+
     return results
 
 
@@ -739,7 +769,7 @@ def main():
         print(f"Seed: {args.seed}")
 
     all_results = []
-    solver_names = ["QUBO (SA)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)"]
+    solver_names = ["QUBO (SA)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)"]
 
     for trial in range(args.num_trials):
         if args.problem_set == "simple":
