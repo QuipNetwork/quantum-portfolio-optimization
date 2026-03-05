@@ -299,39 +299,31 @@ def compute_qubit_requirements(
         zephyr_actual_chain=za_chain,
     ))
 
-    # CQM (Exact): n vars, native constraints, not QPU-bound
-    results.append(QubitInfo(
-        solver_name="CQM (Exact)",
-        asset_qubits=n,
-        constraint_qubits=0,
-        logical_qubits=n,
-    ))
-
-    # CQM (SA): n + auto-slack after cqm_to_bqm, not QPU-bound
+    # CQM (SA->BQM): produces a real BQM that can be QPU-embedded
     cqm_opt = CQMPortfolioOptimizer(
         assets=assets, budget=budget,
         max_duration=max_duration, max_cardinality=max_cardinality,
     )
     bqm, _ = cqm_opt.to_bqm()
     cqm_bqm_vars = bqm.num_variables
+    p_phys, p_chain = get_clique_embedding(cqm_bqm_vars, "pegasus")
+    z_phys, z_chain = get_clique_embedding(cqm_bqm_vars, "zephyr")
+    pa_phys, pa_chain = embed_bqm(bqm, "pegasus")
+    za_phys, za_chain = embed_bqm(bqm, "zephyr")
     results.append(QubitInfo(
         solver_name="CQM (SA->BQM)",
         asset_qubits=n,
         constraint_qubits=cqm_bqm_vars - n,
         logical_qubits=cqm_bqm_vars,
+        pegasus_physical=p_phys,
+        pegasus_chain=p_chain,
+        zephyr_physical=z_phys,
+        zephyr_chain=z_chain,
+        pegasus_actual=pa_phys,
+        pegasus_actual_chain=pa_chain,
+        zephyr_actual=za_phys,
+        zephyr_actual_chain=za_chain,
     ))
-
-    # NL (Exact): n vars, native model, Stride-bound
-    results.append(QubitInfo(
-        solver_name="NL (Exact)",
-        asset_qubits=n,
-        constraint_qubits=0,
-        logical_qubits=n,
-    ))
-
-    # Classical solvers: no qubits
-    for name in ["Brute Force", "Greedy", "Random", "ILP (scipy)"]:
-        results.append(QubitInfo(solver_name=name))
 
     # Weight-encoding reference (QPO main project comparison)
     for n_levels, label in [(4, "Weight 4-level"), (8, "Weight 8-level")]:
