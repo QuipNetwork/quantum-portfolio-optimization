@@ -31,7 +31,8 @@ Key advantages:
 - Same constraint semantics as CQM (true inequality <=)
 
 Solvers available:
-- solve_exact(): Local brute-force enumeration (small problems only, ~20 vars)
+- solve_exact(): Combination enumeration exploiting cardinality constraint.
+    Scales to large n when cardinality is small (e.g. n=200, k=3 → ~1.3M states).
 - solve_nl(): Stride hybrid solver via LeapHybridNLSampler (requires Leap credentials)
 
 Usage:
@@ -59,7 +60,8 @@ Usage:
 
 import numpy as np
 from dataclasses import dataclass
-from itertools import product
+import math
+from itertools import combinations
 from typing import List, Dict, Any, Optional
 
 from dwave.optimization import Model
@@ -177,19 +179,40 @@ class NLPortfolioOptimizer:
             'is_feasible': is_feasible,
         }
 
-    def solve_exact(self) -> Dict[str, Any]:
+    def _estimate_states(self) -> int:
+        """Estimate total states to enumerate: C(n,0) + ... + C(n,k)."""
+        return sum(
+            math.comb(self.n, r)
+            for r in range(self.max_cardinality + 1)
+        )
+
+    def solve_exact(self, max_states: int = 10_000_000) -> Dict[str, Any]:
         """
-        Solve by brute-force enumeration of all 2^n binary states.
+        Solve by enumerating combinations up to max_cardinality.
 
-        Sets each possible binary assignment on the model's state,
-        evaluates feasibility and objective, and returns the best
-        feasible solution.
+        Uses C(n,k) combination enumeration instead of 2^n brute force,
+        exploiting the cardinality constraint to skip invalid states.
+        This allows exact solving for much larger n when cardinality
+        is small (e.g. n=200 with k=3 → ~1.3M states).
 
-        Only suitable for small problems (~20 variables or less).
+        Args:
+            max_states: Bail out if estimated states exceed this limit.
+                Default 10M (~seconds of runtime).
 
         Returns:
-            Dictionary with selection, metrics, and constraint satisfaction
+            Dictionary with selection, metrics, and constraint satisfaction.
+
+        Raises:
+            ValueError: If estimated states exceed max_states.
         """
+        estimated = self._estimate_states()
+        if estimated > max_states:
+            raise ValueError(
+                f"Exact solver would enumerate {estimated:,} states "
+                f"(n={self.n}, k={self.max_cardinality}). "
+                f"Limit is {max_states:,}. Use solve_nl() for large problems."
+            )
+
         if self._model is None:
             self.build_model()
 
@@ -204,22 +227,25 @@ class NLPortfolioOptimizer:
         best_selection = None
         best_energy = float('inf')
 
-        # Enumerate all 2^n binary assignments
-        for bits in product([0.0, 1.0], repeat=self.n):
-            state = np.array(bits)
-            x_var.set_state(0, state)
+        # Enumerate combinations of size 0..max_cardinality
+        for r in range(self.max_cardinality + 1):
+            for combo in combinations(range(self.n), r):
+                state = np.zeros(self.n)
+                for idx in combo:
+                    state[idx] = 1.0
+                x_var.set_state(0, state)
 
-            if not model.feasible(0):
-                continue
+                if not model.feasible(0):
+                    continue
 
-            energy = float(model.objective.state(0))
-            if energy < best_energy:
-                best_energy = energy
-                best_selection = state.copy()
+                energy = float(model.objective.state(0))
+                if energy < best_energy:
+                    best_energy = energy
+                    best_selection = state.copy()
 
         model.unlock()
 
-        # If no feasible solution found (shouldn't happen — empty set is always feasible)
+        # Empty set is always feasible, so we should always find something
         if best_selection is None:
             best_selection = np.zeros(self.n)
             best_energy = 0.0

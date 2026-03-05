@@ -19,16 +19,23 @@ Usage:
 """
 
 import argparse
+import math
 import time
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
+
 from itertools import combinations
 
 from simple_portfolio_qubo import SimplePortfolioQUBO, get_example_assets, get_example_constraints
 from slack_portfolio_qubo import SlackPortfolioQUBO
 from cqm_portfolio import CQMPortfolioOptimizer
 from nl_portfolio import NLPortfolioOptimizer
+
+import dwave.embedding.pegasus as pegasus_emb
+import dwave.embedding.zephyr as zephyr_emb
+import dwave_networkx as dnx
+from minorminer import find_embedding
 
 
 @dataclass
@@ -46,6 +53,346 @@ class BenchmarkResult:
     duration_satisfied: bool
     cardinality_satisfied: bool
     is_feasible: bool
+
+
+@dataclass
+class QubitInfo:
+    """Qubit requirements for a solver formulation."""
+    solver_name: str
+    asset_qubits: Optional[int] = None
+    constraint_qubits: Optional[int] = None
+    logical_qubits: Optional[int] = None
+    # Clique embedding (K_n upper bound)
+    pegasus_physical: Optional[int] = None
+    pegasus_chain: Optional[int] = None
+    zephyr_physical: Optional[int] = None
+    zephyr_chain: Optional[int] = None
+    # Actual BQM graph embedding (tighter, graph-aware)
+    pegasus_actual: Optional[int] = None
+    pegasus_actual_chain: Optional[int] = None
+    zephyr_actual: Optional[int] = None
+    zephyr_actual_chain: Optional[int] = None
+
+
+# Cached topology graphs (built once)
+_pegasus_graph = None
+_zephyr_graph = None
+
+
+def _get_topology_graph(topology: str):
+    """Get or build a cached topology graph."""
+    global _pegasus_graph, _zephyr_graph
+    if topology == "pegasus":
+        if _pegasus_graph is None:
+            _pegasus_graph = dnx.pegasus_graph(16)
+        return _pegasus_graph
+    elif topology == "zephyr":
+        if _zephyr_graph is None:
+            _zephyr_graph = dnx.zephyr_graph(4)
+        return _zephyr_graph
+    raise ValueError(f"Unknown topology: {topology}")
+
+
+def embed_bqm(bqm, topology: str = "pegasus", seed: int = 42):
+    """Compute actual minor embedding for a BQM's interaction graph.
+
+    Args:
+        bqm: A dimod BinaryQuadraticModel.
+        topology: "pegasus" or "zephyr".
+        seed: Random seed for reproducible embeddings.
+
+    Returns:
+        (total_physical_qubits, max_chain_length) or (None, None) if
+        the embedding fails.
+    """
+    target = _get_topology_graph(topology)
+    source_edges = list(bqm.quadratic)
+    if not source_edges:
+        # No interactions — each variable maps to 1 physical qubit
+        return (bqm.num_variables, 1)
+    try:
+        emb = find_embedding(
+            source_edges, target.edges(), random_seed=seed,
+        )
+    except (ValueError, RuntimeError):
+        return (None, None)
+    if not emb:
+        return (None, None)
+    physical = sum(len(chain) for chain in emb.values())
+    max_chain = max(len(chain) for chain in emb.values())
+    return (physical, max_chain)
+
+
+# Cache for clique embeddings to avoid recomputation
+_embedding_cache: Dict[Tuple[str, int], Tuple[int, int]] = {}
+
+
+def get_clique_embedding(
+    logical_qubits: int,
+    topology: str = "pegasus",
+) -> Tuple[int, int]:
+    """Compute physical qubits and max chain length for a clique embedding.
+
+    Args:
+        logical_qubits: Number of logical qubits (clique size).
+        topology: "pegasus" (Advantage P16) or "zephyr" (Advantage2 Z4).
+
+    Returns:
+        (total_physical_qubits, max_chain_length).
+        Returns (None, None) if the clique doesn't fit.
+    """
+    cache_key = (topology, logical_qubits)
+    if cache_key in _embedding_cache:
+        return _embedding_cache[cache_key]
+
+    try:
+        if topology == "pegasus":
+            emb = pegasus_emb.find_clique_embedding(logical_qubits, 16)
+        elif topology == "zephyr":
+            emb = zephyr_emb.find_clique_embedding(logical_qubits, 4)
+        else:
+            raise ValueError(f"Unknown topology: {topology}")
+    except ValueError:
+        # Clique too large for this topology
+        _embedding_cache[cache_key] = (None, None)
+        return (None, None)
+
+    if not emb:
+        _embedding_cache[cache_key] = (None, None)
+        return (None, None)
+
+    physical = sum(len(chain) for chain in emb.values())
+    max_chain = max(len(chain) for chain in emb.values())
+    _embedding_cache[cache_key] = (physical, max_chain)
+    return (physical, max_chain)
+
+
+def compute_qubit_requirements(
+    assets: List[Dict[str, Any]],
+    constraints: Dict[str, Any],
+) -> List[QubitInfo]:
+    """Compute qubit requirements for all solver formulations.
+
+    Args:
+        assets: List of asset dictionaries.
+        constraints: Problem constraints.
+
+    Returns:
+        List of QubitInfo for each solver type.
+    """
+    n = len(assets)
+    budget = constraints['budget']
+    max_duration = constraints['max_duration']
+    max_cardinality = constraints['max_cardinality']
+
+    results = []
+
+    # Simple QUBO: n asset vars, 0 slack (soft penalties)
+    simple_logical = n
+    p_phys, p_chain = get_clique_embedding(simple_logical, "pegasus")
+    z_phys, z_chain = get_clique_embedding(simple_logical, "zephyr")
+    simple_opt = SimplePortfolioQUBO(assets=assets, **{
+        'budget': budget,
+        'max_duration': max_duration,
+        'max_cardinality': max_cardinality,
+        'lambda_budget': constraints.get('lambda_budget', 2.0),
+        'lambda_duration': constraints.get('lambda_duration', 10.0),
+        'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+    })
+    simple_bqm = simple_opt.to_bqm()
+    pa_phys, pa_chain = embed_bqm(simple_bqm, "pegasus")
+    za_phys, za_chain = embed_bqm(simple_bqm, "zephyr")
+    results.append(QubitInfo(
+        solver_name="QUBO (SA/Filt/HighPen)",
+        asset_qubits=n,
+        constraint_qubits=0,
+        logical_qubits=simple_logical,
+        pegasus_physical=p_phys,
+        pegasus_chain=p_chain,
+        zephyr_physical=z_phys,
+        zephyr_chain=z_chain,
+        pegasus_actual=pa_phys,
+        pegasus_actual_chain=pa_chain,
+        zephyr_actual=za_phys,
+        zephyr_actual_chain=za_chain,
+    ))
+
+    # Slack QUBO: n asset vars + slack bits
+    slack_constraints = {
+        'budget': budget,
+        'max_duration': max_duration,
+        'max_cardinality': max_cardinality,
+        'lambda_budget': constraints.get('lambda_budget', 2.0),
+        'lambda_duration': constraints.get('lambda_duration', 10.0),
+        'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+    }
+    slack_opt = SlackPortfolioQUBO(assets=assets, **slack_constraints)
+    var_info = slack_opt.get_variable_info()
+    slack_logical = var_info['n_total']
+    slack_bits = (var_info['n_budget_slack']
+                  + var_info['n_duration_slack']
+                  + var_info['n_cardinality_slack'])
+    p_phys, p_chain = get_clique_embedding(slack_logical, "pegasus")
+    z_phys, z_chain = get_clique_embedding(slack_logical, "zephyr")
+    slack_bqm = slack_opt.to_bqm()
+    pa_phys, pa_chain = embed_bqm(slack_bqm, "pegasus")
+    za_phys, za_chain = embed_bqm(slack_bqm, "zephyr")
+    results.append(QubitInfo(
+        solver_name="QUBO (Slack/Slack+Filt)",
+        asset_qubits=n,
+        constraint_qubits=slack_bits,
+        logical_qubits=slack_logical,
+        pegasus_physical=p_phys,
+        pegasus_chain=p_chain,
+        zephyr_physical=z_phys,
+        zephyr_chain=z_chain,
+        pegasus_actual=pa_phys,
+        pegasus_actual_chain=pa_chain,
+        zephyr_actual=za_phys,
+        zephyr_actual_chain=za_chain,
+    ))
+
+    # CQM (Exact): n vars, native constraints, not QPU-bound
+    results.append(QubitInfo(
+        solver_name="CQM (Exact)",
+        asset_qubits=n,
+        constraint_qubits=0,
+        logical_qubits=n,
+    ))
+
+    # CQM (SA): n + auto-slack after cqm_to_bqm, not QPU-bound
+    cqm_opt = CQMPortfolioOptimizer(
+        assets=assets, budget=budget,
+        max_duration=max_duration, max_cardinality=max_cardinality,
+    )
+    bqm, _ = cqm_opt.to_bqm()
+    cqm_bqm_vars = bqm.num_variables
+    results.append(QubitInfo(
+        solver_name="CQM (SA->BQM)",
+        asset_qubits=n,
+        constraint_qubits=cqm_bqm_vars - n,
+        logical_qubits=cqm_bqm_vars,
+    ))
+
+    # NL (Exact): n vars, native model, Stride-bound
+    results.append(QubitInfo(
+        solver_name="NL (Exact)",
+        asset_qubits=n,
+        constraint_qubits=0,
+        logical_qubits=n,
+    ))
+
+    # Classical solvers: no qubits
+    for name in ["Brute Force", "Greedy", "Random", "ILP (scipy)"]:
+        results.append(QubitInfo(solver_name=name))
+
+    # Weight-encoding reference (QPO main project comparison)
+    for n_levels, label in [(4, "Weight 4-level"), (8, "Weight 8-level")]:
+        weight_logical = n * n_levels
+        p_phys, p_chain = get_clique_embedding(
+            weight_logical, "pegasus"
+        )
+        z_phys, z_chain = get_clique_embedding(
+            weight_logical, "zephyr"
+        )
+        results.append(QubitInfo(
+            solver_name=f"[ref] {label}",
+            asset_qubits=n * n_levels,
+            constraint_qubits=0,
+            logical_qubits=weight_logical,
+            pegasus_physical=p_phys,
+            pegasus_chain=p_chain,
+            zephyr_physical=z_phys,
+            zephyr_chain=z_chain,
+        ))
+
+    return results
+
+
+def print_qubit_table(qubit_info: List[QubitInfo], n_assets: int):
+    """Print qubit requirements table with clique and actual embeddings."""
+    actual = [q for q in qubit_info if not q.solver_name.startswith("[ref]")]
+    refs = [q for q in qubit_info if q.solver_name.startswith("[ref]")]
+
+    width = 135
+    print(f"\n{'=' * width}")
+    print(f" Qubit Requirements (n={n_assets} assets, binary selection encoding)")
+    print(f"{'=' * width}")
+
+    header = (
+        f"{'Solver':<24} "
+        f"{'Assets':>6} "
+        f"{'Slack':>5} "
+        f"{'Logical':>7}  "
+        f"{'Peg Clique':>10} "
+        f"{'Peg Actual':>10} "
+        f"{'Zep Clique':>10} "
+        f"{'Zep Actual':>10}  "
+        f"{'Fits Adv?':>9} "
+        f"{'Fits Adv2?':>10}"
+    )
+    print(header)
+    print("-" * width)
+
+    def fmt_emb(phys, chain):
+        """Format embedding as 'phys / chain' or dash."""
+        if phys is not None:
+            return f"{phys} / {chain}"
+        return "\u2014"
+
+    def fmt_row(q: QubitInfo):
+        asset_s = f"{q.asset_qubits:>6}" if q.asset_qubits is not None else f"{'\u2014':>6}"
+        slack_s = f"{q.constraint_qubits:>5}" if q.constraint_qubits is not None else f"{'\u2014':>5}"
+        logical_s = f"{q.logical_qubits:>7}" if q.logical_qubits is not None else f"{'\u2014':>7}"
+
+        peg_cliq = fmt_emb(q.pegasus_physical, q.pegasus_chain)
+        peg_act = fmt_emb(q.pegasus_actual, q.pegasus_actual_chain)
+        zep_cliq = fmt_emb(q.zephyr_physical, q.zephyr_chain)
+        zep_act = fmt_emb(q.zephyr_actual, q.zephyr_actual_chain)
+
+        # Use best (smallest) embedding for "fits" check
+        peg_candidates = [v for v in [q.pegasus_actual, q.pegasus_physical]
+                          if v is not None]
+        peg_best = min(peg_candidates) if peg_candidates else None
+        zep_candidates = [v for v in [q.zephyr_actual, q.zephyr_physical]
+                          if v is not None]
+        zep_best = min(zep_candidates) if zep_candidates else None
+
+        if peg_best is not None:
+            fits_adv = "YES" if peg_best <= 5600 else "NO"
+        else:
+            fits_adv = "\u2014"
+
+        if zep_best is not None:
+            fits_adv2 = "YES" if zep_best <= 4000 else "NO"
+        else:
+            fits_adv2 = "\u2014"
+
+        return (
+            f"{q.solver_name:<24} "
+            f"{asset_s} {slack_s} {logical_s}  "
+            f"{peg_cliq:>10} {peg_act:>10} "
+            f"{zep_cliq:>10} {zep_act:>10}  "
+            f"{fits_adv:>9} {fits_adv2:>10}"
+        )
+
+    for q in actual:
+        print(fmt_row(q))
+
+    if refs:
+        print("-" * width)
+        print("  Reference: weight-encoded formulation "
+              "(QPO main project)")
+        for q in refs:
+            print(fmt_row(q))
+
+    print("-" * width)
+    print("  Pegasus = Advantage P16 (~5,600 qubits) | "
+          "Zephyr = Advantage2 Z4 (~4,000 qubits)")
+    print("  Clique = K_n embedding (upper bound, fully-connected) | "
+          "Actual = minorminer on BQM graph (tighter)")
+    print("  Format: physical_qubits / max_chain_length")
+    print()
 
 
 def brute_force_solve(
@@ -540,20 +887,22 @@ def run_benchmark(
             is_feasible=False
         ))
 
-    # 8. NL (Exact) - Brute-force via dwave-optimization model (small problems only)
-    if n <= 20:
-        start = time.perf_counter()
-        nl_constraints = {
-            'budget': budget,
-            'max_duration': max_duration,
-            'max_cardinality': max_cardinality,
-        }
-        nl_optimizer = NLPortfolioOptimizer(assets=assets, **nl_constraints)
+    # 8. NL (Exact) - Combination enumeration via dwave-optimization model
+    start = time.perf_counter()
+    nl_constraints = {
+        'budget': budget,
+        'max_duration': max_duration,
+        'max_cardinality': max_cardinality,
+    }
+    nl_optimizer = NLPortfolioOptimizer(assets=assets, **nl_constraints)
+    try:
         nl_result = nl_optimizer.solve_exact()
         nl_time = (time.perf_counter() - start) * 1000
         nl_selection = [i for i, x in enumerate(nl_result['selection']) if x == 1]
         results.append(make_result("NL (Exact)", nl_selection, nl_time, nl_result['energy']))
-    else:
+    except ValueError:
+        # Too many states to enumerate
+        nl_time = (time.perf_counter() - start) * 1000
         results.append(BenchmarkResult(
             solver_name="NL (Exact)",
             selected_assets=[],
@@ -562,7 +911,7 @@ def run_benchmark(
             total_duration=0.0,
             num_selected=0,
             energy=0.0,
-            runtime_ms=0.0,
+            runtime_ms=nl_time,
             budget_satisfied=False,
             duration_satisfied=False,
             cardinality_satisfied=False,
@@ -755,6 +1104,11 @@ def main():
         default=None,
         help="Random seed for reproducibility"
     )
+    parser.add_argument(
+        "--no-qubits",
+        action="store_true",
+        help="Skip qubit requirements table"
+    )
 
     args = parser.parse_args()
 
@@ -781,13 +1135,17 @@ def main():
             assets, constraints = generate_random_problem(args.num_assets, seed=trial_seed)
             title = f"Random Problem (n={args.num_assets}, Trial {trial + 1}/{args.num_trials})"
 
-        # Print problem info for first trial
+        # Print problem info and qubit table for first trial
         if trial == 0:
             print(f"\nProblem Configuration:")
             print(f"  Assets: {len(assets)}")
             print(f"  Budget target: ${constraints['budget']:.2f}")
             print(f"  Max duration: {constraints['max_duration']}")
             print(f"  Max cardinality: {constraints['max_cardinality']}")
+
+            if not args.no_qubits:
+                qubit_info = compute_qubit_requirements(assets, constraints)
+                print_qubit_table(qubit_info, len(assets))
 
         trial_seed = args.seed + trial if args.seed is not None else None
         results = run_benchmark(

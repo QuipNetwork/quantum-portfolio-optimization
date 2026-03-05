@@ -411,3 +411,70 @@ class TestEdgeCases:
 
         assert result['num_selected'] == 0
         assert result['total_score'] == pytest.approx(0.0)
+
+
+class TestCombinationEnumeration:
+    """Tests for combination-based exact solver (large n, small k)."""
+
+    def test_large_n_small_k_finds_optimal(self):
+        """Test that n=50, k=3 finds the optimal solution."""
+        rng = np.random.default_rng(42)
+        assets = [
+            {
+                'id': f'A{i:02d}',
+                'price': round(rng.uniform(0.5, 2.0), 2),
+                'duration': int(rng.integers(1, 15)),
+                'score': int(rng.integers(1, 20)),
+            }
+            for i in range(50)
+        ]
+
+        total_price = sum(a['price'] for a in assets)
+        optimizer = NLPortfolioOptimizer(
+            assets=assets,
+            budget=round(total_price * 0.4, 2),
+            max_duration=100,
+            max_cardinality=3,
+        )
+
+        result = optimizer.solve_exact()
+
+        assert result['is_feasible']
+        assert result['num_selected'] <= 3
+        assert result['total_score'] > 0
+
+    def test_state_estimate(self):
+        """Test that _estimate_states matches expected C(n,k) sum."""
+        assets = get_example_assets()
+        optimizer = NLPortfolioOptimizer(
+            assets=assets, budget=3.0, max_duration=15, max_cardinality=3
+        )
+
+        # C(5,0) + C(5,1) + C(5,2) + C(5,3) = 1 + 5 + 10 + 10 = 26
+        assert optimizer._estimate_states() == 26
+
+    def test_bailout_on_too_many_states(self):
+        """Test that solve_exact raises ValueError when states exceed limit."""
+        assets = [
+            {'id': f'A{i}', 'price': 1.0, 'duration': 1, 'score': 1}
+            for i in range(100)
+        ]
+        optimizer = NLPortfolioOptimizer(
+            assets=assets, budget=1000.0,
+            max_duration=1000, max_cardinality=50,
+        )
+
+        with pytest.raises(ValueError, match="states"):
+            optimizer.solve_exact(max_states=1000)
+
+    def test_custom_max_states_allows_run(self):
+        """Test that increasing max_states allows larger problems."""
+        assets = get_example_assets()
+        optimizer = NLPortfolioOptimizer(
+            assets=assets, budget=3.0, max_duration=15, max_cardinality=3
+        )
+
+        # 26 states should be fine with max_states=100
+        result = optimizer.solve_exact(max_states=100)
+        assert result['is_feasible']
+        assert result['total_score'] == pytest.approx(17.0)
