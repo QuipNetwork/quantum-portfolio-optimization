@@ -19,7 +19,9 @@ Usage:
 """
 
 import argparse
+import json
 import math
+import os
 import time
 import numpy as np
 from dataclasses import dataclass, field
@@ -32,10 +34,27 @@ from slack_portfolio_qubo import SlackPortfolioQUBO
 from cqm_portfolio import CQMPortfolioOptimizer
 from nl_portfolio import NLPortfolioOptimizer
 
-import dwave.embedding.pegasus as pegasus_emb
-import dwave.embedding.zephyr as zephyr_emb
-import dwave_networkx as dnx
-from minorminer import find_embedding
+# D-Wave embedding packages (optional — falls back to topology_cache.json)
+try:
+    import dwave.embedding.pegasus as pegasus_emb
+    import dwave.embedding.zephyr as zephyr_emb
+    import dwave_networkx as dnx
+    from minorminer import find_embedding as _find_embedding
+    _HAS_DWAVE_EMBEDDING = True
+except ImportError:
+    _HAS_DWAVE_EMBEDDING = False
+
+_CACHE_PATH = os.path.join(os.path.dirname(__file__), "topology_cache.json")
+_topology_cache: Optional[Dict] = None
+
+
+def _load_topology_cache() -> Dict:
+    """Load pre-computed clique embeddings from cache file."""
+    global _topology_cache
+    if _topology_cache is None:
+        with open(_CACHE_PATH) as f:
+            _topology_cache = json.load(f)
+    return _topology_cache
 
 
 @dataclass
@@ -80,7 +99,12 @@ _zephyr_graph = None
 
 
 def _get_topology_graph(topology: str):
-    """Get or build a cached topology graph."""
+    """Get or build a cached topology graph.
+
+    Requires dwave_networkx. Returns None if not available.
+    """
+    if not _HAS_DWAVE_EMBEDDING:
+        return None
     global _pegasus_graph, _zephyr_graph
     if topology == "pegasus":
         if _pegasus_graph is None:
@@ -88,13 +112,16 @@ def _get_topology_graph(topology: str):
         return _pegasus_graph
     elif topology == "zephyr":
         if _zephyr_graph is None:
-            _zephyr_graph = dnx.zephyr_graph(4)
+            _zephyr_graph = dnx.zephyr_graph(12)
         return _zephyr_graph
     raise ValueError(f"Unknown topology: {topology}")
 
 
 def embed_bqm(bqm, topology: str = "pegasus", seed: int = 42):
     """Compute actual minor embedding for a BQM's interaction graph.
+
+    Requires minorminer and dwave_networkx. Returns (None, None) if
+    these packages are not installed.
 
     Args:
         bqm: A dimod BinaryQuadraticModel.
@@ -103,15 +130,16 @@ def embed_bqm(bqm, topology: str = "pegasus", seed: int = 42):
 
     Returns:
         (total_physical_qubits, max_chain_length) or (None, None) if
-        the embedding fails.
+        the embedding fails or packages are not available.
     """
     target = _get_topology_graph(topology)
+    if target is None:
+        return (None, None)
     source_edges = list(bqm.quadratic)
     if not source_edges:
-        # No interactions — each variable maps to 1 physical qubit
         return (bqm.num_variables, 1)
     try:
-        emb = find_embedding(
+        emb = _find_embedding(
             source_edges, target.edges(), random_seed=seed,
         )
     except (ValueError, RuntimeError):
@@ -133,9 +161,12 @@ def get_clique_embedding(
 ) -> Tuple[int, int]:
     """Compute physical qubits and max chain length for a clique embedding.
 
+    Uses D-Wave embedding packages if available, otherwise falls back to
+    pre-computed results in topology_cache.json.
+
     Args:
         logical_qubits: Number of logical qubits (clique size).
-        topology: "pegasus" (Advantage P16) or "zephyr" (Advantage2 Z4).
+        topology: "pegasus" (Advantage P16) or "zephyr" (Advantage2 Z12).
 
     Returns:
         (total_physical_qubits, max_chain_length).
@@ -145,26 +176,42 @@ def get_clique_embedding(
     if cache_key in _embedding_cache:
         return _embedding_cache[cache_key]
 
+    # Try live computation first
+    if _HAS_DWAVE_EMBEDDING:
+        try:
+            if topology == "pegasus":
+                emb = pegasus_emb.find_clique_embedding(logical_qubits, 16)
+            elif topology == "zephyr":
+                emb = zephyr_emb.find_clique_embedding(logical_qubits, 12)
+            else:
+                raise ValueError(f"Unknown topology: {topology}")
+        except ValueError:
+            _embedding_cache[cache_key] = (None, None)
+            return (None, None)
+
+        if not emb:
+            _embedding_cache[cache_key] = (None, None)
+            return (None, None)
+
+        physical = sum(len(chain) for chain in emb.values())
+        max_chain = max(len(chain) for chain in emb.values())
+        _embedding_cache[cache_key] = (physical, max_chain)
+        return (physical, max_chain)
+
+    # Fall back to cached results
     try:
-        if topology == "pegasus":
-            emb = pegasus_emb.find_clique_embedding(logical_qubits, 16)
-        elif topology == "zephyr":
-            emb = zephyr_emb.find_clique_embedding(logical_qubits, 4)
+        tc = _load_topology_cache()
+        file_key = f"{topology}:{logical_qubits}"
+        entry = tc["clique_embeddings"].get(file_key)
+        if entry is not None:
+            result = (entry[0], entry[1])
         else:
-            raise ValueError(f"Unknown topology: {topology}")
-    except ValueError:
-        # Clique too large for this topology
+            result = (None, None)
+        _embedding_cache[cache_key] = result
+        return result
+    except (FileNotFoundError, KeyError):
         _embedding_cache[cache_key] = (None, None)
         return (None, None)
-
-    if not emb:
-        _embedding_cache[cache_key] = (None, None)
-        return (None, None)
-
-    physical = sum(len(chain) for chain in emb.values())
-    max_chain = max(len(chain) for chain in emb.values())
-    _embedding_cache[cache_key] = (physical, max_chain)
-    return (physical, max_chain)
 
 
 def compute_qubit_requirements(
@@ -364,7 +411,7 @@ def print_qubit_table(qubit_info: List[QubitInfo], n_assets: int):
             fits_adv = "\u2014"
 
         if zep_best is not None:
-            fits_adv2 = "YES" if zep_best <= 4000 else "NO"
+            fits_adv2 = "YES" if zep_best <= 4400 else "NO"
         else:
             fits_adv2 = "\u2014"
 
@@ -388,7 +435,7 @@ def print_qubit_table(qubit_info: List[QubitInfo], n_assets: int):
 
     print("-" * width)
     print("  Pegasus = Advantage P16 (~5,600 qubits) | "
-          "Zephyr = Advantage2 Z4 (~4,000 qubits)")
+          "Zephyr = Advantage2 Z12 (~4,400 qubits)")
     print("  Clique = K_n embedding (upper bound, fully-connected) | "
           "Actual = minorminer on BQM graph (tighter)")
     print("  Format: physical_qubits / max_chain_length")
