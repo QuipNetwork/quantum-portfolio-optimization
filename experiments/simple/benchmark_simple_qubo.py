@@ -40,6 +40,12 @@ try:
 except ImportError:
     _HAS_QHDOPT = False
 
+try:
+    from cuopt_portfolio import CuOptPortfolioOptimizer
+    _HAS_CUOPT = True
+except ImportError:
+    _HAS_CUOPT = False
+
 # D-Wave embedding packages (optional — falls back to topology_cache.json)
 try:
     import dwave.embedding.pegasus as pegasus_emb
@@ -1037,6 +1043,86 @@ def run_benchmark(
             cardinality_satisfied=False, is_feasible=False
         ))
 
+    # 11. cuOpt-MILP — GPU-accelerated binary integer programming
+    if _HAS_CUOPT:
+        start = time.perf_counter()
+        cuopt_constraints = {
+            'budget': budget,
+            'max_duration': max_duration,
+            'max_cardinality': max_cardinality,
+            'lambda_budget': constraints.get('lambda_budget', 2.0),
+            'lambda_duration': constraints.get('lambda_duration', 10.0),
+            'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+        }
+        cuopt_optimizer = CuOptPortfolioOptimizer(assets=assets, **cuopt_constraints)
+        try:
+            cuopt_milp_result = cuopt_optimizer.solve_milp()
+            cuopt_milp_time = (time.perf_counter() - start) * 1000
+            cuopt_milp_selection = [
+                i for i, x in enumerate(cuopt_milp_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "cuOpt-MILP", cuopt_milp_selection, cuopt_milp_time,
+                cuopt_milp_result.get('energy', 0.0)
+            ))
+        except Exception:
+            cuopt_milp_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="cuOpt-MILP", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=cuopt_milp_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="cuOpt-MILP", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
+    # 12. cuOpt-QP — GPU QP solver with QUBO penalty matrix
+    if _HAS_CUOPT:
+        start = time.perf_counter()
+        cuopt_qp_constraints = {
+            'budget': budget,
+            'max_duration': max_duration,
+            'max_cardinality': max_cardinality,
+            'lambda_budget': constraints.get('lambda_budget', 2.0),
+            'lambda_duration': constraints.get('lambda_duration', 10.0),
+            'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+        }
+        cuopt_qp_optimizer = CuOptPortfolioOptimizer(assets=assets, **cuopt_qp_constraints)
+        try:
+            cuopt_qp_result = cuopt_qp_optimizer.solve_qp()
+            cuopt_qp_time = (time.perf_counter() - start) * 1000
+            cuopt_qp_selection = [
+                i for i, x in enumerate(cuopt_qp_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "cuOpt-QP", cuopt_qp_selection, cuopt_qp_time,
+                cuopt_qp_result.get('energy', 0.0)
+            ))
+        except Exception:
+            cuopt_qp_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="cuOpt-QP", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=cuopt_qp_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="cuOpt-QP", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
     return results
 
 
@@ -1242,7 +1328,7 @@ def main():
         print(f"Seed: {args.seed}")
 
     all_results = []
-    solver_names = ["QUBO (SA)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)", "QHD-QP", "QHD-SymPy"]
+    solver_names = ["QUBO (SA)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)", "QHD-QP", "QHD-SymPy", "cuOpt-MILP", "cuOpt-QP"]
 
     for trial in range(args.num_trials):
         if args.problem_set == "simple":
