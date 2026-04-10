@@ -34,6 +34,12 @@ from slack_portfolio_qubo import SlackPortfolioQUBO
 from cqm_portfolio import CQMPortfolioOptimizer
 from nl_portfolio import NLPortfolioOptimizer
 
+try:
+    from qhd_portfolio import QHDPortfolioOptimizer
+    _HAS_QHDOPT = True
+except ImportError:
+    _HAS_QHDOPT = False
+
 # D-Wave embedding packages (optional — falls back to topology_cache.json)
 try:
     import dwave.embedding.pegasus as pegasus_emb
@@ -957,6 +963,80 @@ def run_benchmark(
             is_feasible=False
         ))
 
+    # 9. QHD-QP (Classical) — QHDOPT with QUBO matrix via QP interface
+    if _HAS_QHDOPT:
+        start = time.perf_counter()
+        qhd_constraints = {
+            'budget': budget,
+            'max_duration': max_duration,
+            'max_cardinality': max_cardinality,
+            'lambda_budget': constraints.get('lambda_budget', 2.0),
+            'lambda_duration': constraints.get('lambda_duration', 10.0),
+            'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+        }
+        qhd_optimizer = QHDPortfolioOptimizer(assets=assets, **qhd_constraints)
+        try:
+            qhd_qp_result = qhd_optimizer.solve_qp(num_shots=50)
+            qhd_qp_time = (time.perf_counter() - start) * 1000
+            qhd_qp_selection = [i for i, x in enumerate(qhd_qp_result['selection']) if x == 1]
+            results.append(make_result(
+                "QHD-QP", qhd_qp_selection, qhd_qp_time, qhd_qp_result.get('energy', 0.0)
+            ))
+        except Exception:
+            qhd_qp_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="QHD-QP", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=qhd_qp_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="QHD-QP", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
+    # 10. QHD-SymPy (Classical) — QHDOPT with native formulation + binary penalty
+    if _HAS_QHDOPT:
+        start = time.perf_counter()
+        qhd_constraints = {
+            'budget': budget,
+            'max_duration': max_duration,
+            'max_cardinality': max_cardinality,
+            'lambda_budget': constraints.get('lambda_budget', 2.0),
+            'lambda_duration': constraints.get('lambda_duration', 10.0),
+            'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+        }
+        qhd_sp_optimizer = QHDPortfolioOptimizer(assets=assets, **qhd_constraints)
+        try:
+            qhd_sp_result = qhd_sp_optimizer.solve_sympy(num_shots=50)
+            qhd_sp_time = (time.perf_counter() - start) * 1000
+            qhd_sp_selection = [i for i, x in enumerate(qhd_sp_result['selection']) if x == 1]
+            results.append(make_result(
+                "QHD-SymPy", qhd_sp_selection, qhd_sp_time, qhd_sp_result.get('energy', 0.0)
+            ))
+        except Exception:
+            qhd_sp_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="QHD-SymPy", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=qhd_sp_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="QHD-SymPy", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
     return results
 
 
@@ -1162,7 +1242,7 @@ def main():
         print(f"Seed: {args.seed}")
 
     all_results = []
-    solver_names = ["QUBO (SA)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)"]
+    solver_names = ["QUBO (SA)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)", "QHD-QP", "QHD-SymPy"]
 
     for trial in range(args.num_trials):
         if args.problem_set == "simple":
