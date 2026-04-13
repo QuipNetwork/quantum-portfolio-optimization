@@ -218,6 +218,32 @@ class CuOptPortfolioOptimizer:
 
         prob.setObjective(quad_expr, sense=MINIMIZE)
 
+        # Constraints mirror the MILP path — the QUBO matrix
+        # encodes penalties but the QP solver still needs explicit
+        # bounds for feasible continuous relaxation.
+        budget_expr = sum(
+            float(self.prices[i]) * x[i]
+            for i in range(self.n)
+        )
+        prob.addConstraint(
+            budget_expr <= self.budget, name="budget"
+        )
+
+        duration_expr = sum(
+            float(self.durations[i]) * x[i]
+            for i in range(self.n)
+        )
+        prob.addConstraint(
+            duration_expr <= self.max_duration,
+            name="duration",
+        )
+
+        card_expr = sum(x[i] for i in range(self.n))
+        prob.addConstraint(
+            card_expr <= self.max_cardinality,
+            name="cardinality",
+        )
+
         return prob, x
 
     def solve_milp(self) -> Dict[str, Any]:

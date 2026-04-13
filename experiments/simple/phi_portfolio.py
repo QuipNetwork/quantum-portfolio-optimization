@@ -130,7 +130,7 @@ class PhiPortfolioOptimizer:
         Returns:
             phisolve.problems.QUBO instance.
         """
-        from phisolve import QUBO
+        from phisolve.problems.qubo import QUBO
 
         q_qubo = self._qubo_optimizer.build_qubo_matrix()
         q_phi = 2.0 * q_qubo
@@ -192,7 +192,10 @@ class PhiPortfolioOptimizer:
     def solve_qubo(
         self,
         n_shots: int = 100,
-        n_steps: int = 1000,
+        # OpenPhiSolve 0.2.0 has a bug: qihd.py:152 divides by
+        # (n_steps - 1000), so n_steps <= 1000 causes div-by-zero.
+        # Use the upstream default of 10000 until the bug is fixed.
+        n_steps: int = 10000,
         seed: int = 42,
         device: str = "cpu",
     ) -> Dict[str, Any]:
@@ -201,7 +204,7 @@ class PhiPortfolioOptimizer:
 
         Args:
             n_shots: Number of samples to generate.
-            n_steps: Number of QIHD evolution steps.
+            n_steps: Number of QIHD evolution steps (must be > 1000).
             seed: Random seed for reproducibility.
             device: JAX device ("cpu" or "gpu").
 
@@ -240,7 +243,10 @@ class PhiPortfolioOptimizer:
     def solve_miqp(
         self,
         n_shots: int = 100,
-        n_steps: int = 1000,
+        # OpenPhiSolve 0.2.0 has a bug: qihd.py:152 divides by
+        # (n_steps - 1000), so n_steps <= 1000 causes div-by-zero.
+        # Use the upstream default of 10000 until the bug is fixed.
+        n_steps: int = 10000,
         seed: int = 42,
         device: str = "cpu",
     ) -> Dict[str, Any]:
@@ -249,7 +255,7 @@ class PhiPortfolioOptimizer:
 
         Args:
             n_shots: Number of samples to generate.
-            n_steps: Number of QIHD evolution steps.
+            n_steps: Number of QIHD evolution steps (must be > 1000).
             seed: Random seed for reproducibility.
             device: JAX device ("cpu" or "gpu").
 

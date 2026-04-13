@@ -1142,7 +1142,8 @@ def run_benchmark(
         }
         phi_optimizer = PhiPortfolioOptimizer(assets=assets, **phi_constraints)
         try:
-            phi_qubo_result = phi_optimizer.solve_qubo(n_shots=100, n_steps=1000)
+            # n_steps must be > 1000: OpenPhiSolve 0.2.0 bug (qihd.py:152)
+            phi_qubo_result = phi_optimizer.solve_qubo(n_shots=100, n_steps=10000)
             phi_qubo_time = (time.perf_counter() - start) * 1000
             phi_qubo_selection = [
                 i for i, x in enumerate(phi_qubo_result['selection']) if x == 1
@@ -1182,7 +1183,8 @@ def run_benchmark(
         }
         phi_miqp_optimizer = PhiPortfolioOptimizer(assets=assets, **phi_miqp_constraints)
         try:
-            phi_miqp_result = phi_miqp_optimizer.solve_miqp(n_shots=100, n_steps=1000)
+            # n_steps must be > 1000: OpenPhiSolve 0.2.0 bug (qihd.py:152)
+            phi_miqp_result = phi_miqp_optimizer.solve_miqp(n_shots=100, n_steps=10000)
             phi_miqp_time = (time.perf_counter() - start) * 1000
             phi_miqp_selection = [
                 i for i, x in enumerate(phi_miqp_result['selection']) if x == 1
