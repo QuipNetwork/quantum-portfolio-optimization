@@ -104,3 +104,57 @@ def test_solve_qubo_energy_matches_selection(pdf_optimizer, require_qubosolver):
     result = pdf_optimizer.solve_qubo(seed=42)
     expected = pdf_optimizer._compute_energy(result['selection'])
     assert abs(result['energy'] - expected) < 1e-6
+
+
+# --- solve_mis ---
+
+
+@pytest.fixture
+def require_mis_libs():
+    pytest.importorskip("mis")
+    pytest.importorskip("networkx")
+
+
+def test_build_conflict_graph_pairs_over_budget(pdf_optimizer, require_mis_libs):
+    g = pdf_optimizer._build_conflict_graph()
+    p = pdf_optimizer.prices
+    b = pdf_optimizer.budget
+    for i in range(pdf_optimizer.n):
+        for j in range(i + 1, pdf_optimizer.n):
+            if p[i] + p[j] > b:
+                assert g.has_edge(i, j), f"missing budget edge ({i},{j})"
+
+
+def test_build_conflict_graph_pairs_over_duration(pdf_optimizer, require_mis_libs):
+    g = pdf_optimizer._build_conflict_graph()
+    d = pdf_optimizer.durations
+    md = pdf_optimizer.max_duration
+    for i in range(pdf_optimizer.n):
+        for j in range(i + 1, pdf_optimizer.n):
+            if d[i] + d[j] > md:
+                assert g.has_edge(i, j), f"missing duration edge ({i},{j})"
+
+
+def test_solve_mis_runs_on_pdf_example(pdf_optimizer, require_mis_libs):
+    result = pdf_optimizer.solve_mis(seed=42)
+    assert result['selection'].shape == (pdf_optimizer.n,)
+
+
+def test_solve_mis_returns_binary_selection(pdf_optimizer, require_mis_libs):
+    result = pdf_optimizer.solve_mis(seed=42)
+    assert set(result['selection'].tolist()).issubset({0, 1})
+
+
+def test_solve_mis_returns_feasible_after_post_selection(pdf_optimizer, require_mis_libs):
+    result = pdf_optimizer.solve_mis(seed=42)
+    assert result['is_feasible'] is True
+
+
+def test_solve_mis_result_has_standard_shape(pdf_optimizer, require_mis_libs):
+    result = pdf_optimizer.solve_mis(seed=42)
+    for key in (
+        'selection', 'selected_assets', 'energy',
+        'total_price', 'total_duration', 'total_score',
+        'num_selected', 'is_feasible',
+    ):
+        assert key in result

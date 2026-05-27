@@ -227,3 +227,104 @@ class PasqalPortfolioOptimizer:
         energy = self._compute_energy(selection)
         is_feasible = self._is_feasible(selection)
         return self._build_result(selection, energy, is_feasible)
+
+    def _build_conflict_graph(self):
+        """
+        Build a pairwise asset-conflict graph for the MIS encoding.
+
+        Nodes are asset indices 0..n-1. An edge (i, j) means assets i
+        and j cannot coexist under a pairwise relaxation of the
+        constraints — combined price > budget OR combined duration >
+        max_duration. The MIS of this graph is the largest set of
+        assets that fits PAIRWISE; it does NOT enforce the full
+        multi-asset budget, total duration, or cardinality, and does
+        NOT consider scores. Those are handled in post-selection.
+
+        Returns:
+            networkx.Graph
+        """
+        import networkx as nx
+
+        g = nx.Graph()
+        g.add_nodes_from(range(self.n))
+        for i in range(self.n):
+            for j in range(i + 1, self.n):
+                over_budget = (
+                    self.prices[i] + self.prices[j] > self.budget
+                )
+                over_duration = (
+                    self.durations[i] + self.durations[j]
+                    > self.max_duration
+                )
+                if over_budget or over_duration:
+                    g.add_edge(i, j)
+        return g
+
+    def _score_aware_post_selection(self, candidates: List[int]) -> np.ndarray:
+        """
+        From an MIS candidate set, greedily pick highest-score assets
+        until adding another would violate any full constraint
+        (budget, duration, cardinality).
+        """
+        ordered = sorted(candidates, key=lambda i: -self.scores[i])
+        chosen: List[int] = []
+        for idx in ordered:
+            trial = chosen + [idx]
+            if (
+                np.sum(self.prices[trial]) <= self.budget
+                and np.sum(self.durations[trial]) <= self.max_duration
+                and len(trial) <= self.max_cardinality
+            ):
+                chosen.append(idx)
+        x = np.zeros(self.n, dtype=int)
+        x[chosen] = 1
+        return x
+
+    def solve_mis(
+        self,
+        runs: int = 100,
+        seed: int = 42,
+    ) -> Dict[str, Any]:
+        """
+        Solve via pairwise-conflict MIS + score-aware post-selection.
+
+        NOT directly comparable to solve_qubo: the quantum step finds
+        the largest set of assets that fit PAIRWISE within budget and
+        duration; scores and multi-asset interactions are handled
+        classically afterwards.
+
+        Args:
+            runs: Number of MIS solver shots.
+            seed: RNG seed. Currently unused — kept for API symmetry
+                with the other solve_* methods. (mis library does not
+                accept a seed in BackendConfig as of 0.3.x.)
+
+        Returns:
+            Standard result dict (see _build_result).
+        """
+        from mis import (
+            BackendConfig,
+            MISInstance,
+            MISSolver,
+            SolverConfig as MisSolverConfig,
+        )
+
+        graph = self._build_conflict_graph()
+        instance = MISInstance(graph)
+        config = MisSolverConfig(
+            backend=BackendConfig(backend="qutip"),
+            runs=runs,
+            max_number_of_solutions=5,
+        )
+        solver = MISSolver(instance, config)
+        solutions = solver.solve()
+
+        if not solutions:
+            selection = np.zeros(self.n, dtype=int)
+        else:
+            best = solutions[0]
+            selection = self._score_aware_post_selection(list(best.nodes))
+
+        energy = self._compute_energy(selection)
+        is_feasible = self._is_feasible(selection)
+        return self._build_result(selection, energy, is_feasible)
