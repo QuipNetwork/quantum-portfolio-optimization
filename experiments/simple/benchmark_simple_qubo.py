@@ -52,6 +52,12 @@ try:
 except ImportError:
     _HAS_PHISOLVE = False
 
+try:
+    from pasqal_portfolio import PasqalPortfolioOptimizer
+    _HAS_PASQAL = True
+except ImportError:
+    _HAS_PASQAL = False
+
 # D-Wave embedding packages (optional — falls back to topology_cache.json)
 try:
     import dwave.embedding.pegasus as pegasus_emb
@@ -1205,6 +1211,116 @@ def run_benchmark(
     else:
         results.append(BenchmarkResult(
             solver_name="Phi-MIQP", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
+    # 15. Pasqal-QUBO — qubosolver LocalEmulator on the QUBO penalty matrix
+    if _HAS_PASQAL:
+        start = time.perf_counter()
+        pasqal_constraints = {
+            'budget': budget,
+            'max_duration': max_duration,
+            'max_cardinality': max_cardinality,
+            'lambda_budget': constraints.get('lambda_budget', 2.0),
+            'lambda_duration': constraints.get('lambda_duration', 10.0),
+            'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+        }
+        pasqal_optimizer = PasqalPortfolioOptimizer(
+            assets=assets, **pasqal_constraints
+        )
+        try:
+            pasqal_qubo_result = pasqal_optimizer.solve_qubo()
+            pasqal_qubo_time = (time.perf_counter() - start) * 1000
+            pasqal_qubo_selection = [
+                i for i, x in enumerate(pasqal_qubo_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "Pasqal-QUBO", pasqal_qubo_selection, pasqal_qubo_time,
+                pasqal_qubo_result.get('energy', 0.0)
+            ))
+        except Exception:
+            pasqal_qubo_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="Pasqal-QUBO", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=pasqal_qubo_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="Pasqal-QUBO", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
+    # 16. Pasqal-MIS — Max Independent Set on pairwise conflict graph (NOT comparable)
+    if _HAS_PASQAL:
+        start = time.perf_counter()
+        pasqal_optimizer = PasqalPortfolioOptimizer(
+            assets=assets, **pasqal_constraints
+        )
+        try:
+            pasqal_mis_result = pasqal_optimizer.solve_mis()
+            pasqal_mis_time = (time.perf_counter() - start) * 1000
+            pasqal_mis_selection = [
+                i for i, x in enumerate(pasqal_mis_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "Pasqal-MIS", pasqal_mis_selection, pasqal_mis_time,
+                pasqal_mis_result.get('energy', 0.0)
+            ))
+        except Exception:
+            pasqal_mis_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="Pasqal-MIS", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=pasqal_mis_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="Pasqal-MIS", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
+    # 17. Pasqal-Pulser — raw Rydberg adiabatic sequence (NOT comparable, n<=12)
+    if _HAS_PASQAL:
+        start = time.perf_counter()
+        pasqal_optimizer = PasqalPortfolioOptimizer(
+            assets=assets, **pasqal_constraints
+        )
+        try:
+            pasqal_pulser_result = pasqal_optimizer.solve_pulser(n_shots=50)
+            pasqal_pulser_time = (time.perf_counter() - start) * 1000
+            pasqal_pulser_selection = [
+                i for i, x in enumerate(pasqal_pulser_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "Pasqal-Pulser", pasqal_pulser_selection, pasqal_pulser_time,
+                pasqal_pulser_result.get('energy', 0.0)
+            ))
+        except Exception:
+            pasqal_pulser_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="Pasqal-Pulser", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=pasqal_pulser_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="Pasqal-Pulser", selected_assets=[], total_score=0.0,
             total_price=0.0, total_duration=0.0, num_selected=0,
             energy=0.0, runtime_ms=0.0,
             budget_satisfied=False, duration_satisfied=False,
