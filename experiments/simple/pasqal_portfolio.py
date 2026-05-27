@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Copyright (C) 2025 Postquant Labs Incorporated
 #
 # This program is free software: you can redistribute it and/or modify
@@ -68,6 +69,22 @@ class PasqalPortfolioOptimizer:
         lambda_duration: float = 10.0,
         lambda_cardinality: float = 5.0,
     ):
+        """
+        Initialize the Pasqal portfolio optimizer.
+
+        Args:
+            assets: List of asset dicts with keys 'id', 'price',
+                'duration', 'score'.
+            budget: Maximum total price (<=).
+            max_duration: Maximum total duration (<=).
+            max_cardinality: Maximum number of assets (<=).
+            lambda_budget: Penalty weight for the budget constraint
+                in the QUBO penalty matrix (used by solve_qubo /
+                solve_pulser via the internal SimplePortfolioQUBO).
+            lambda_duration: Penalty weight for the duration constraint.
+            lambda_cardinality: Penalty weight for the cardinality
+                constraint.
+        """
         self.assets = assets
         self.n = len(assets)
         self.budget = budget
