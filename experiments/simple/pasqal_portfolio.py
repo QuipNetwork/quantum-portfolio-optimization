@@ -265,6 +265,17 @@ class PasqalPortfolioOptimizer:
         From an MIS candidate set, greedily pick highest-score assets
         until adding another would violate any full constraint
         (budget, duration, cardinality).
+
+        Note: This is a greedy first-fit heuristic, not an optimal
+        sub-solver. It may miss higher-total-score combinations where
+        skipping a high-scoring asset would unlock multiple lower-
+        scoring ones.
+
+        Args:
+            candidates: Asset indices returned by the MIS solver.
+
+        Returns:
+            Binary numpy array of shape (n,).
         """
         ordered = sorted(candidates, key=lambda i: -self.scores[i])
         chosen: List[int] = []
@@ -323,6 +334,12 @@ class PasqalPortfolioOptimizer:
             selection = np.zeros(self.n, dtype=int)
         else:
             best = solutions[0]
+            if not hasattr(best, 'nodes'):
+                raise RuntimeError(
+                    f"MISSolver returned a solution with no 'nodes' "
+                    f"attribute (got {type(best).__name__}). Check "
+                    f"mis library version (expected >= 0.3.x)."
+                )
             selection = self._score_aware_post_selection(list(best.nodes))
 
         energy = self._compute_energy(selection)
