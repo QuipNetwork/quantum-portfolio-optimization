@@ -206,3 +206,27 @@ def test_solve_pulser_rejects_oversized_problem():
     )
     with pytest.raises(ValueError, match="13"):
         opt.solve_pulser()
+
+
+# --- integration ---
+
+
+def test_all_three_paths_run_on_pdf_example(pdf_optimizer):
+    """All three Pasqal paths produce a feasible selection on the PDF example.
+
+    Comparability note: only solve_qubo is expected to be competitive
+    on score. MIS and Pulser only need to be feasible.
+    """
+    pytest.importorskip("qubosolver")
+    pytest.importorskip("mis")
+    pytest.importorskip("pulser")
+
+    qubo = pdf_optimizer.solve_qubo(seed=42)
+    mis = pdf_optimizer.solve_mis(seed=42)
+    pulser_r = pdf_optimizer.solve_pulser(n_shots=20, seed=42)
+
+    for label, result in (("qubo", qubo), ("mis", mis), ("pulser", pulser_r)):
+        assert result['is_feasible'], f"{label} returned infeasible result"
+
+    # Comparable row should match or beat trivial all-zeros (score 0).
+    assert qubo['total_score'] > 0
