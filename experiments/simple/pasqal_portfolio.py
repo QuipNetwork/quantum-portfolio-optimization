@@ -418,8 +418,10 @@ class PasqalPortfolioOptimizer:
         emulation cost (2^n state vector).
 
         Args:
-            n_shots: Number of samples drawn from the simulator
-                (passed through to QutipBackendV2 if it accepts it).
+            n_shots: Number of samples. Currently unused —
+                QutipBackendV2.run() does not expose a shot count
+                parameter; kept for API symmetry with the other
+                solve_* methods.
             seed: RNG seed. Currently unused — Pulser's QutipBackendV2
                 does not accept a seed; kept for API symmetry with
                 the other solve_* methods.
@@ -461,7 +463,11 @@ class PasqalPortfolioOptimizer:
         best_str = max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
         raw = np.array([int(c) for c in best_str], dtype=int)
         if raw.shape[0] != self.n:
-            raw = np.resize(raw, self.n)
+            raise RuntimeError(
+                f"Pulser returned a bitstring of length "
+                f"{raw.shape[0]} but register has {self.n} atoms. "
+                f"Check pulser version."
+            )
 
         selection = self._round_and_repair(raw.astype(float))
         energy = self._compute_energy(selection)
