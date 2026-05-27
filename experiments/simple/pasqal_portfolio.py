@@ -213,7 +213,14 @@ class PasqalPortfolioOptimizer:
         )
         from qubosolver.solver import QuboSolver
 
-        q_qubo = self._qubo_optimizer.build_qubo_matrix()
+        # qubosolver evaluates x^T Q x with the matrix as-is. Our
+        # build_qubo_matrix returns a SYMMETRIC Q where each off-diagonal
+        # coupling lives in both Q[i,j] and Q[j,i] — so x^T Q x would
+        # double-count pair interactions vs the dwave-neal convention
+        # (upper-triangle only). Pass the upper triangle so the energy
+        # landscape matches what dwave-neal sees and what the QUBO
+        # formulation in simple_portfolio_qubo.py was designed for.
+        q_qubo = np.triu(self._qubo_optimizer.build_qubo_matrix())
         instance = QUBOInstance(q_qubo)
         config = SolverConfig(use_quantum=True, backend=LocalEmulator())
         solver = QuboSolver(instance, config)
