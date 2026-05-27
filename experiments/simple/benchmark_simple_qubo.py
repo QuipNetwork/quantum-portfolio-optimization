@@ -34,6 +34,24 @@ from slack_portfolio_qubo import SlackPortfolioQUBO
 from cqm_portfolio import CQMPortfolioOptimizer
 from nl_portfolio import NLPortfolioOptimizer
 
+try:
+    from qhd_portfolio import QHDPortfolioOptimizer
+    _HAS_QHDOPT = True
+except ImportError:
+    _HAS_QHDOPT = False
+
+try:
+    from cuopt_portfolio import CuOptPortfolioOptimizer
+    _HAS_CUOPT = True
+except ImportError:
+    _HAS_CUOPT = False
+
+try:
+    from phi_portfolio import PhiPortfolioOptimizer
+    _HAS_PHISOLVE = True
+except ImportError:
+    _HAS_PHISOLVE = False
+
 # D-Wave embedding packages (optional — falls back to topology_cache.json)
 try:
     import dwave.embedding.pegasus as pegasus_emb
@@ -957,6 +975,242 @@ def run_benchmark(
             is_feasible=False
         ))
 
+    # 9. QHD-QP (Classical) — QHDOPT with QUBO matrix via QP interface
+    if _HAS_QHDOPT:
+        start = time.perf_counter()
+        qhd_constraints = {
+            'budget': budget,
+            'max_duration': max_duration,
+            'max_cardinality': max_cardinality,
+            'lambda_budget': constraints.get('lambda_budget', 2.0),
+            'lambda_duration': constraints.get('lambda_duration', 10.0),
+            'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+        }
+        qhd_optimizer = QHDPortfolioOptimizer(assets=assets, **qhd_constraints)
+        try:
+            qhd_qp_result = qhd_optimizer.solve_qp(num_shots=50)
+            qhd_qp_time = (time.perf_counter() - start) * 1000
+            qhd_qp_selection = [i for i, x in enumerate(qhd_qp_result['selection']) if x == 1]
+            results.append(make_result(
+                "QHD-QP", qhd_qp_selection, qhd_qp_time, qhd_qp_result.get('energy', 0.0)
+            ))
+        except Exception:
+            qhd_qp_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="QHD-QP", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=qhd_qp_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="QHD-QP", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
+    # 10. QHD-SymPy (Classical) — QHDOPT with native formulation + binary penalty
+    if _HAS_QHDOPT:
+        start = time.perf_counter()
+        qhd_constraints = {
+            'budget': budget,
+            'max_duration': max_duration,
+            'max_cardinality': max_cardinality,
+            'lambda_budget': constraints.get('lambda_budget', 2.0),
+            'lambda_duration': constraints.get('lambda_duration', 10.0),
+            'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+        }
+        qhd_sp_optimizer = QHDPortfolioOptimizer(assets=assets, **qhd_constraints)
+        try:
+            qhd_sp_result = qhd_sp_optimizer.solve_sympy(num_shots=50)
+            qhd_sp_time = (time.perf_counter() - start) * 1000
+            qhd_sp_selection = [i for i, x in enumerate(qhd_sp_result['selection']) if x == 1]
+            results.append(make_result(
+                "QHD-SymPy", qhd_sp_selection, qhd_sp_time, qhd_sp_result.get('energy', 0.0)
+            ))
+        except Exception:
+            qhd_sp_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="QHD-SymPy", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=qhd_sp_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="QHD-SymPy", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
+    # 11. cuOpt-MILP — GPU-accelerated binary integer programming
+    if _HAS_CUOPT:
+        start = time.perf_counter()
+        cuopt_constraints = {
+            'budget': budget,
+            'max_duration': max_duration,
+            'max_cardinality': max_cardinality,
+            'lambda_budget': constraints.get('lambda_budget', 2.0),
+            'lambda_duration': constraints.get('lambda_duration', 10.0),
+            'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+        }
+        cuopt_optimizer = CuOptPortfolioOptimizer(assets=assets, **cuopt_constraints)
+        try:
+            cuopt_milp_result = cuopt_optimizer.solve_milp()
+            cuopt_milp_time = (time.perf_counter() - start) * 1000
+            cuopt_milp_selection = [
+                i for i, x in enumerate(cuopt_milp_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "cuOpt-MILP", cuopt_milp_selection, cuopt_milp_time,
+                cuopt_milp_result.get('energy', 0.0)
+            ))
+        except Exception:
+            cuopt_milp_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="cuOpt-MILP", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=cuopt_milp_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="cuOpt-MILP", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
+    # 12. cuOpt-QP — GPU QP solver with QUBO penalty matrix
+    if _HAS_CUOPT:
+        start = time.perf_counter()
+        cuopt_qp_constraints = {
+            'budget': budget,
+            'max_duration': max_duration,
+            'max_cardinality': max_cardinality,
+            'lambda_budget': constraints.get('lambda_budget', 2.0),
+            'lambda_duration': constraints.get('lambda_duration', 10.0),
+            'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+        }
+        cuopt_qp_optimizer = CuOptPortfolioOptimizer(assets=assets, **cuopt_qp_constraints)
+        try:
+            cuopt_qp_result = cuopt_qp_optimizer.solve_qp()
+            cuopt_qp_time = (time.perf_counter() - start) * 1000
+            cuopt_qp_selection = [
+                i for i, x in enumerate(cuopt_qp_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "cuOpt-QP", cuopt_qp_selection, cuopt_qp_time,
+                cuopt_qp_result.get('energy', 0.0)
+            ))
+        except Exception:
+            cuopt_qp_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="cuOpt-QP", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=cuopt_qp_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="cuOpt-QP", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
+    # 13. Phi-QUBO — PhiSolve QIHD with QUBO penalty matrix
+    if _HAS_PHISOLVE:
+        start = time.perf_counter()
+        phi_constraints = {
+            'budget': budget,
+            'max_duration': max_duration,
+            'max_cardinality': max_cardinality,
+            'lambda_budget': constraints.get('lambda_budget', 2.0),
+            'lambda_duration': constraints.get('lambda_duration', 10.0),
+            'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+        }
+        phi_optimizer = PhiPortfolioOptimizer(assets=assets, **phi_constraints)
+        try:
+            # n_steps must be > 1000: OpenPhiSolve 0.2.0 bug (qihd.py:152)
+            phi_qubo_result = phi_optimizer.solve_qubo(n_shots=100, n_steps=10000)
+            phi_qubo_time = (time.perf_counter() - start) * 1000
+            phi_qubo_selection = [
+                i for i, x in enumerate(phi_qubo_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "Phi-QUBO", phi_qubo_selection, phi_qubo_time,
+                phi_qubo_result.get('energy', 0.0)
+            ))
+        except Exception:
+            phi_qubo_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="Phi-QUBO", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=phi_qubo_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="Phi-QUBO", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
+    # 14. Phi-MIQP — PhiSolve QIHD with native linear constraints
+    if _HAS_PHISOLVE:
+        start = time.perf_counter()
+        phi_miqp_constraints = {
+            'budget': budget,
+            'max_duration': max_duration,
+            'max_cardinality': max_cardinality,
+            'lambda_budget': constraints.get('lambda_budget', 2.0),
+            'lambda_duration': constraints.get('lambda_duration', 10.0),
+            'lambda_cardinality': constraints.get('lambda_cardinality', 5.0),
+        }
+        phi_miqp_optimizer = PhiPortfolioOptimizer(assets=assets, **phi_miqp_constraints)
+        try:
+            # n_steps must be > 1000: OpenPhiSolve 0.2.0 bug (qihd.py:152)
+            phi_miqp_result = phi_miqp_optimizer.solve_miqp(n_shots=100, n_steps=10000)
+            phi_miqp_time = (time.perf_counter() - start) * 1000
+            phi_miqp_selection = [
+                i for i, x in enumerate(phi_miqp_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "Phi-MIQP", phi_miqp_selection, phi_miqp_time,
+                phi_miqp_result.get('energy', 0.0)
+            ))
+        except Exception:
+            phi_miqp_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="Phi-MIQP", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=phi_miqp_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="Phi-MIQP", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
     return results
 
 
@@ -1162,7 +1416,7 @@ def main():
         print(f"Seed: {args.seed}")
 
     all_results = []
-    solver_names = ["QUBO (SA)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)"]
+    solver_names = ["QUBO (SA)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)", "QHD-QP", "QHD-SymPy", "cuOpt-MILP", "cuOpt-QP", "Phi-QUBO", "Phi-MIQP"]
 
     for trial in range(args.num_trials):
         if args.problem_set == "simple":
