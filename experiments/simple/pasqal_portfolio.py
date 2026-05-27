@@ -370,15 +370,30 @@ class PasqalPortfolioOptimizer:
         # Rabi=1 rad/us → blockade_radius is device-defined; use it directly.
         blockade_um = device.rydberg_blockade_radius(1.0)
 
+        # AnalogDevice has a max_radial_distance (atoms must lie within
+        # that radius of the array center). A 1D chain of n atoms with
+        # uniform step S, centered at origin, has extremes at ±(n-1)·S/2,
+        # so S ≤ 2·max_radial / (n-1). Cap the non-conflict step (which
+        # we'd like > blockade) at 0.95×max_step so it still fits when
+        # max_step < 2·blockade. This makes non-conflict pairs only
+        # weakly outside blockade for tight problems — a known limitation
+        # documented above.
+        max_step = 2.0 * device.max_radial_distance / max(self.n - 1, 1)
+        conflict_step = min(0.85 * blockade_um, 0.95 * max_step)
+        non_conflict_step = min(2.0 * blockade_um, 0.95 * max_step)
+        conflict_step = max(conflict_step, device.min_atom_distance)
+        non_conflict_step = max(non_conflict_step, device.min_atom_distance)
+
         graph = self._build_conflict_graph()
         coords = [(0.0, 0.0)]
         for i in range(1, self.n):
             prev = coords[-1]
-            if graph.has_edge(i - 1, i):
-                step = 0.85 * blockade_um
-            else:
-                step = 2.0 * blockade_um
+            step = conflict_step if graph.has_edge(i - 1, i) else non_conflict_step
             coords.append((prev[0] + step, 0.0))
+
+        # Center the chain at the origin so coords are symmetric.
+        span_mid = coords[-1][0] / 2.0
+        coords = [(x - span_mid, y) for (x, y) in coords]
 
         register = pulser.Register.from_coordinates(coords, prefix="q")
         return register, device, blockade_um
