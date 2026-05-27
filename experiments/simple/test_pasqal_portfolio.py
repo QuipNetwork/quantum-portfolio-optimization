@@ -64,6 +64,32 @@ def test_round_and_repair_returns_feasible(pdf_optimizer):
     assert pdf_optimizer._is_feasible(repaired)
 
 
+def test_pick_best_feasible_picks_highest_score_among_feasible(pdf_optimizer):
+    # PDF: A+E (score 17) > E only (score 9) > all-zeros (score 0).
+    # All three are feasible; helper must return A+E.
+    candidates = [
+        np.array([0, 0, 0, 0, 0]),
+        np.array([0, 0, 0, 0, 1]),
+        np.array([1, 0, 0, 0, 1]),
+    ]
+    best = pdf_optimizer._pick_best_feasible(candidates)
+    assert best.tolist() == [1, 0, 0, 0, 1]
+
+
+def test_pick_best_feasible_falls_back_to_repair_when_none_feasible(pdf_optimizer):
+    # If every candidate is infeasible, helper must repair and return
+    # SOMETHING feasible (not crash, not return an infeasible result).
+    all_ones = np.ones(pdf_optimizer.n, dtype=int)
+    best = pdf_optimizer._pick_best_feasible([all_ones])
+    assert pdf_optimizer._is_feasible(best)
+
+
+def test_pick_best_feasible_handles_empty_input(pdf_optimizer):
+    # Edge case: empty candidate list returns all-zeros (vacuously feasible).
+    best = pdf_optimizer._pick_best_feasible([])
+    assert best.tolist() == [0] * pdf_optimizer.n
+
+
 # --- solve_qubo ---
 
 

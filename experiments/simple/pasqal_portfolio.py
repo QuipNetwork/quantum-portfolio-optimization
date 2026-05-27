@@ -157,6 +157,47 @@ class PasqalPortfolioOptimizer:
                 break
         return x
 
+    def _portfolio_score(self, selection: np.ndarray) -> float:
+        """Sum of selected asset scores. Used to rank candidates by
+        portfolio objective (not by QUBO/Ising energy, which the
+        Pasqal-QUBO bug-#1 investigation showed can diverge from the
+        true portfolio objective for badly-conditioned QUBO matrices)."""
+        x = np.asarray(selection)
+        return float(np.sum(self.scores[x == 1]))
+
+    def _pick_best_feasible(
+        self,
+        candidates: List[np.ndarray],
+    ) -> np.ndarray:
+        """
+        Choose the best feasible binary selection from a list of
+        candidates, ranked by portfolio score.
+
+        Strategy:
+        1. Round each candidate to {0,1} (idempotent for already-binary).
+        2. Keep candidates that satisfy ALL constraints as-is.
+        3. If any feasible candidate exists, return the highest-score one.
+        4. Otherwise, repair each candidate via _round_and_repair and
+           return the best-scoring of the repaired set.
+
+        This handles the common case where a Pasqal/D-Wave solver
+        returns multiple low-cost bitstrings but the lowest-cost one
+        isn't the best portfolio (matrix convention or formulation
+        biases). O(k·n) for k candidates.
+        """
+        if not candidates:
+            return np.zeros(self.n, dtype=int)
+
+        rounded = [
+            (np.asarray(c) > 0.5).astype(int) for c in candidates
+        ]
+        feasible = [x for x in rounded if self._is_feasible(x)]
+        if feasible:
+            return max(feasible, key=self._portfolio_score)
+
+        repaired = [self._round_and_repair(x.astype(float)) for x in rounded]
+        return max(repaired, key=self._portfolio_score)
+
     def _build_result(
         self,
         selection: np.ndarray,
@@ -232,8 +273,16 @@ class PasqalPortfolioOptimizer:
                 "Check QUBOInstance/SolverConfig validity or upgrade "
                 "qubosolver."
             )
-        raw = np.asarray(solution.bitstrings[0], dtype=int)
-        selection = self._round_and_repair(raw.astype(float))
+        # Evaluate ALL returned bitstrings by portfolio score. The
+        # lowest-QUBO-cost bitstring isn't guaranteed to be the best
+        # portfolio (the QUBO penalty matrix may bias toward states
+        # that minimize penalty terms over score); picking the best
+        # feasible across the full sample list is O(k·n), trivially
+        # cheap compared to the solver run.
+        candidates = [
+            np.asarray(b, dtype=int) for b in solution.bitstrings
+        ]
+        selection = self._pick_best_feasible(candidates)
         energy = self._compute_energy(selection)
         is_feasible = self._is_feasible(selection)
         return self._build_result(selection, energy, is_feasible)
