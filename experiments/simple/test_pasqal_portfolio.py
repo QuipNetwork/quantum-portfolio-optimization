@@ -166,6 +166,7 @@ def test_solve_mis_result_has_standard_shape(pdf_optimizer, require_mis_libs):
 @pytest.fixture
 def require_pulser():
     pytest.importorskip("pulser")
+    pytest.importorskip("qutip")
 
 
 def test_solve_pulser_runs_on_pdf_example(pdf_optimizer, require_pulser):

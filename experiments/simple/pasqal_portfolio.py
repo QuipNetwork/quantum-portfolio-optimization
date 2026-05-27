@@ -79,8 +79,11 @@ class PasqalPortfolioOptimizer:
             max_duration: Maximum total duration (<=).
             max_cardinality: Maximum number of assets (<=).
             lambda_budget: Penalty weight for the budget constraint
-                in the QUBO penalty matrix (used by solve_qubo /
-                solve_pulser via the internal SimplePortfolioQUBO).
+                in the QUBO penalty matrix. Used by solve_qubo
+                directly; used by solve_mis and solve_pulser only
+                for post-hoc energy reporting via _compute_energy
+                (their quantum step optimizes the pairwise conflict
+                graph, not the QUBO matrix).
             lambda_duration: Penalty weight for the duration constraint.
             lambda_cardinality: Penalty weight for the cardinality
                 constraint.

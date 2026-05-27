@@ -8,8 +8,9 @@ the other rows. This document explains what each row measures.
 
 ## Pasqal-QUBO (comparable)
 
-Backend: `qubo-solver` 0.5.x with `LocalEmulator` (neutral-atom
-emulator running locally).
+Backend: `qubo-solver` 0.5.x (PyPI package name; imported as
+`qubosolver`) with `LocalEmulator` (neutral-atom emulator running
+locally).
 
 Input: the same QUBO penalty matrix used by D-Wave SA, cuOpt-QP, and
 phi-QUBO — soft penalties for budget, duration, and cardinality.
