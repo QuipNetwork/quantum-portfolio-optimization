@@ -196,7 +196,9 @@ class PasqalPortfolioOptimizer:
         Args:
             n_shots: Number of bitstring samples (unused by some
                 qubosolver backends; kept for API symmetry).
-            seed: RNG seed for reproducibility.
+            seed: RNG seed. Currently unused — qubosolver 0.5's
+                LocalEmulator does not accept a seed; kept for API
+                symmetry with the other solve_* methods.
 
         Returns:
             Standard result dict (see _build_result).
@@ -214,6 +216,12 @@ class PasqalPortfolioOptimizer:
         solver = QuboSolver(instance, config)
         solution = solver.solve()
 
+        if not len(solution.bitstrings):
+            raise RuntimeError(
+                "qubosolver LocalEmulator returned no bitstrings. "
+                "Check QUBOInstance/SolverConfig validity or upgrade "
+                "qubosolver."
+            )
         raw = np.asarray(solution.bitstrings[0], dtype=int)
         selection = self._round_and_repair(raw.astype(float))
         energy = self._compute_energy(selection)
