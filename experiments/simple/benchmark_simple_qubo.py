@@ -1532,7 +1532,7 @@ def main():
         print(f"Seed: {args.seed}")
 
     all_results = []
-    solver_names = ["QUBO (SA)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)", "QHD-QP", "QHD-SymPy", "cuOpt-MILP", "cuOpt-QP", "Phi-QUBO", "Phi-MIQP"]
+    solver_names = ["QUBO (SA)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)", "QHD-QP", "QHD-SymPy", "cuOpt-MILP", "cuOpt-QP", "Phi-QUBO", "Phi-MIQP", "Pasqal-QUBO", "Pasqal-MIS", "Pasqal-Pulser"]
 
     for trial in range(args.num_trials):
         if args.problem_set == "simple":
