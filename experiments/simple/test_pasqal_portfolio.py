@@ -158,3 +158,51 @@ def test_solve_mis_result_has_standard_shape(pdf_optimizer, require_mis_libs):
         'num_selected', 'is_feasible',
     ):
         assert key in result
+
+
+# --- solve_pulser ---
+
+
+@pytest.fixture
+def require_pulser():
+    pytest.importorskip("pulser")
+
+
+def test_solve_pulser_runs_on_pdf_example(pdf_optimizer, require_pulser):
+    result = pdf_optimizer.solve_pulser(n_shots=20, seed=42)
+    assert result['selection'].shape == (pdf_optimizer.n,)
+
+
+def test_solve_pulser_returns_binary_selection(pdf_optimizer, require_pulser):
+    result = pdf_optimizer.solve_pulser(n_shots=20, seed=42)
+    assert set(result['selection'].tolist()).issubset({0, 1})
+
+
+def test_solve_pulser_returns_feasible_after_repair(pdf_optimizer, require_pulser):
+    result = pdf_optimizer.solve_pulser(n_shots=20, seed=42)
+    assert result['is_feasible'] is True
+
+
+def test_solve_pulser_result_has_standard_shape(pdf_optimizer, require_pulser):
+    result = pdf_optimizer.solve_pulser(n_shots=20, seed=42)
+    for key in (
+        'selection', 'selected_assets', 'energy',
+        'total_price', 'total_duration', 'total_score',
+        'num_selected', 'is_feasible',
+    ):
+        assert key in result
+
+
+def test_solve_pulser_rejects_oversized_problem():
+    # n=13 must trigger the Qutip-emulation hard cap before any
+    # Pulser objects get constructed. This test does NOT require pulser
+    # to be installed — the guard runs first.
+    assets = [
+        {'id': f'A{i}', 'price': 0.5, 'duration': 1, 'score': 1}
+        for i in range(13)
+    ]
+    opt = PasqalPortfolioOptimizer(
+        assets=assets, budget=2.0, max_duration=5, max_cardinality=3,
+    )
+    with pytest.raises(ValueError, match="13"):
+        opt.solve_pulser()

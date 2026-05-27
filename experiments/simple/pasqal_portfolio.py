@@ -345,3 +345,125 @@ class PasqalPortfolioOptimizer:
         energy = self._compute_energy(selection)
         is_feasible = self._is_feasible(selection)
         return self._build_result(selection, energy, is_feasible)
+
+    def _build_pulser_register(self):
+        """
+        Build a 1D atomic register encoding the pairwise conflict
+        graph as Rydberg blockade.
+
+        Conflicting pairs (edges in _build_conflict_graph) are placed
+        within the blockade radius; non-conflicting pairs are placed
+        outside it. This is a heuristic 1D layout — sufficient for
+        small problems (n <= 12) but cannot in general realize an
+        arbitrary conflict graph in 1D.
+
+        Returns:
+            (pulser.Register, pulser.devices.Device, float blockade_radius_um)
+        """
+        import pulser
+        from pulser import AnalogDevice
+
+        device = AnalogDevice
+        # Rabi=1 rad/us → blockade_radius is device-defined; use it directly.
+        blockade_um = device.rydberg_blockade_radius(1.0)
+
+        graph = self._build_conflict_graph()
+        coords = [(0.0, 0.0)]
+        for i in range(1, self.n):
+            prev = coords[-1]
+            if graph.has_edge(i - 1, i):
+                step = 0.85 * blockade_um
+            else:
+                step = 2.0 * blockade_um
+            coords.append((prev[0] + step, 0.0))
+
+        register = pulser.Register.from_coordinates(coords, prefix="q")
+        return register, device, blockade_um
+
+    def _build_adiabatic_sequence(self, register, device):
+        """
+        Build a linear-detuning adiabatic Rydberg sequence.
+
+        Sweeps detuning from negative (favoring |g>) to positive
+        (favoring |r>) at constant Rabi amplitude. Total duration
+        4 us is a heuristic — adjust for problem hardness.
+        """
+        import pulser
+        from pulser.waveforms import RampWaveform, ConstantWaveform
+
+        sequence = pulser.Sequence(register, device)
+        sequence.declare_channel("rydberg_global", "rydberg_global")
+
+        duration_ns = 4000
+        rabi = ConstantWaveform(duration_ns, 1.0)
+        detuning = RampWaveform(duration_ns, -5.0, 5.0)
+        pulse = pulser.Pulse(rabi, detuning, phase=0.0)
+        sequence.add(pulse, "rydberg_global")
+        return sequence
+
+    def solve_pulser(
+        self,
+        n_shots: int = 100,
+        seed: int = 42,
+    ) -> Dict[str, Any]:
+        """
+        Solve via a hand-built Rydberg adiabatic pulse sequence.
+
+        Encodes the same pairwise conflict graph as solve_mis as a 1D
+        atom register, then runs an adiabatic detuning sweep at
+        constant Rabi amplitude. The most-common bitstring is taken
+        and repaired to feasibility.
+
+        NOT comparable to solve_qubo. Hard cap n <= 12 due to Qutip
+        emulation cost (2^n state vector).
+
+        Args:
+            n_shots: Number of samples drawn from the simulator
+                (passed through to QutipBackendV2 if it accepts it).
+            seed: RNG seed. Currently unused — Pulser's QutipBackendV2
+                does not accept a seed; kept for API symmetry with
+                the other solve_* methods.
+
+        Raises:
+            ValueError: if n > 12 (emulation infeasible).
+
+        Returns:
+            Standard result dict (see _build_result).
+        """
+        if self.n > _PULSER_MAX_N:
+            raise ValueError(
+                f"solve_pulser only supports n <= {_PULSER_MAX_N} in "
+                f"local Qutip emulation; got n={self.n}."
+            )
+
+        from pulser.backends import QutipBackendV2
+
+        register, device, _blockade = self._build_pulser_register()
+        sequence = self._build_adiabatic_sequence(register, device)
+
+        backend = QutipBackendV2(sequence)
+        result = backend.run()
+
+        if not hasattr(result, 'final_bitstrings'):
+            raise RuntimeError(
+                f"QutipBackendV2.run() returned an object with no "
+                f"'final_bitstrings' attribute (got "
+                f"{type(result).__name__}). Check pulser version."
+            )
+        counts = result.final_bitstrings
+        if not counts:
+            raise RuntimeError(
+                "QutipBackendV2 returned no bitstrings. Check "
+                "register and pulse sequence."
+            )
+
+        # Most common bitstring, lexicographic tie-break for determinism.
+        best_str = max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
+        raw = np.array([int(c) for c in best_str], dtype=int)
+        if raw.shape[0] != self.n:
+            raw = np.resize(raw, self.n)
+
+        selection = self._round_and_repair(raw.astype(float))
+        energy = self._compute_energy(selection)
+        is_feasible = self._is_feasible(selection)
+        return self._build_result(selection, energy, is_feasible)
