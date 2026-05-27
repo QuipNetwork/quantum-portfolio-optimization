@@ -62,3 +62,45 @@ def test_round_and_repair_returns_feasible(pdf_optimizer):
     repaired = pdf_optimizer._round_and_repair(continuous)
     assert set(repaired.tolist()).issubset({0, 1})
     assert pdf_optimizer._is_feasible(repaired)
+
+
+# --- solve_qubo ---
+
+
+@pytest.fixture(autouse=False)
+def require_qubosolver():
+    """Skip any test that uses this fixture when qubosolver is absent."""
+    pytest.importorskip("qubosolver")
+
+
+def test_solve_qubo_runs_on_pdf_example(pdf_optimizer, require_qubosolver):
+    result = pdf_optimizer.solve_qubo(seed=42)
+    assert 'selection' in result
+    assert result['selection'].shape == (pdf_optimizer.n,)
+
+
+def test_solve_qubo_returns_binary_selection(pdf_optimizer, require_qubosolver):
+    result = pdf_optimizer.solve_qubo(seed=42)
+    assert set(result['selection'].tolist()).issubset({0, 1})
+
+
+def test_solve_qubo_result_has_standard_shape(pdf_optimizer, require_qubosolver):
+    result = pdf_optimizer.solve_qubo(seed=42)
+    for key in (
+        'selection', 'selected_assets', 'energy',
+        'total_price', 'total_duration', 'total_score',
+        'num_selected', 'is_feasible',
+    ):
+        assert key in result, f"missing key: {key}"
+
+
+def test_solve_qubo_post_repair_yields_feasible(pdf_optimizer, require_qubosolver):
+    result = pdf_optimizer.solve_qubo(seed=42)
+    # After _round_and_repair, the solver MUST return a feasible selection.
+    assert result['is_feasible'] is True
+
+
+def test_solve_qubo_energy_matches_selection(pdf_optimizer, require_qubosolver):
+    result = pdf_optimizer.solve_qubo(seed=42)
+    expected = pdf_optimizer._compute_energy(result['selection'])
+    assert abs(result['energy'] - expected) < 1e-6

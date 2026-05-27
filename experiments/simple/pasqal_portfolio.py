@@ -179,3 +179,43 @@ class PasqalPortfolioOptimizer:
             'num_selected': len(selected),
             'is_feasible': is_feasible,
         }
+
+    def solve_qubo(
+        self,
+        n_shots: int = 100,
+        seed: int = 42,
+    ) -> Dict[str, Any]:
+        """
+        Solve via qubosolver's LocalEmulator on the QUBO penalty matrix.
+
+        This is the comparable Pasqal path: same QUBO objective as
+        SimplePortfolioQUBO / phi.solve_qubo / dwave-neal SA. The
+        difference is the backend — Pasqal's neutral-atom emulator
+        instead of classical SA or quantum-inspired QIHD.
+
+        Args:
+            n_shots: Number of bitstring samples (unused by some
+                qubosolver backends; kept for API symmetry).
+            seed: RNG seed for reproducibility.
+
+        Returns:
+            Standard result dict (see _build_result).
+        """
+        from qubosolver import (
+            LocalEmulator,
+            QUBOInstance,
+            SolverConfig,
+        )
+        from qubosolver.solver import QuboSolver
+
+        q_qubo = self._qubo_optimizer.build_qubo_matrix()
+        instance = QUBOInstance(q_qubo)
+        config = SolverConfig(use_quantum=True, backend=LocalEmulator())
+        solver = QuboSolver(instance, config)
+        solution = solver.solve()
+
+        raw = np.asarray(solution.bitstrings[0], dtype=int)
+        selection = self._round_and_repair(raw.astype(float))
+        energy = self._compute_energy(selection)
+        is_feasible = self._is_feasible(selection)
+        return self._build_result(selection, energy, is_feasible)
