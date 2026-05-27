@@ -72,3 +72,8 @@ htmlcov/
 
 # OS
 Thumbs.db
+
+# Superpowers workflow artifacts (design specs, implementation plans, brainstorm notes).
+# Kept local as working notes; not part of the durable codebase history.
+docs/superpowers/
+
