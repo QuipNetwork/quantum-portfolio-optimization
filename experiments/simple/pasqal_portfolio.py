@@ -367,8 +367,14 @@ class PasqalPortfolioOptimizer:
         from pulser import AnalogDevice
 
         device = AnalogDevice
-        # Rabi=1 rad/us → blockade_radius is device-defined; use it directly.
-        blockade_um = device.rydberg_blockade_radius(1.0)
+        # Use Rabi=3.0 rad/us throughout (placement + pulse). Higher
+        # Rabi shrinks blockade radius (~Ω^-1/6) which lets more atoms
+        # fit within the device radial constraint, AND tightens the
+        # adiabatic criterion dδ/dt << Ω². At Ω=1 the default sweep
+        # was 2500× too fast for adiabaticity; at Ω=3 it's manageable.
+        rabi_rad_per_us = 3.0
+        blockade_um = device.rydberg_blockade_radius(rabi_rad_per_us)
+        self._pulser_rabi = rabi_rad_per_us
 
         # AnalogDevice has a max_radial_distance (atoms must lie within
         # that radius of the array center). A 1D chain of n atoms with
@@ -412,9 +418,14 @@ class PasqalPortfolioOptimizer:
         sequence = pulser.Sequence(register, device)
         sequence.declare_channel("rydberg_global", "rydberg_global")
 
-        duration_ns = 4000
-        rabi = ConstantWaveform(duration_ns, 1.0)
-        detuning = RampWaveform(duration_ns, -5.0, 5.0)
+        # AnalogDevice caps sequence duration at 6000 ns. Use 6000 ns
+        # at Rabi=3 rad/us: dδ/dt = 16/6 ≈ 2.67 rad/us² vs Ω² = 9 —
+        # adiabatic ratio ~0.3, marginal but acceptable. Sweep -8 → +8
+        # crosses resonance with symmetric margin.
+        duration_ns = 6000
+        rabi_value = getattr(self, '_pulser_rabi', 3.0)
+        rabi = ConstantWaveform(duration_ns, rabi_value)
+        detuning = RampWaveform(duration_ns, -8.0, 8.0)
         pulse = pulser.Pulse(rabi, detuning, phase=0.0)
         sequence.add(pulse, "rydberg_global")
         return sequence
