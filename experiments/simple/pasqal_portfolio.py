@@ -55,6 +55,13 @@ from simple_portfolio_qubo import (
 # Qutip state-vector cost scales as 2^n; n>12 takes minutes per shot.
 _PULSER_MAX_N = 12
 
+# Hard cap on Pasqal-Slack problem size. The slack QUBO matrix adds
+# log2(B/precision) bits per constraint × 3 constraints ≈ 15-20 extra
+# variables at default coarse precision. qubosolver's LocalEmulator
+# scales poorly past ~20 total variables; empirically n=5 takes 3 s,
+# n=12 takes 2.4 hours. Cap at n=8 to keep benchmark runs reasonable.
+_SLACK_MAX_N = 8
+
 
 class PasqalPortfolioOptimizer:
     """Portfolio optimizer with three Pasqal-flavored solver paths."""
@@ -318,9 +325,21 @@ class PasqalPortfolioOptimizer:
             duration_precision: Same tradeoff (default 5.0; SA path
                 uses 1.0).
 
+        Raises:
+            ValueError: if n > 8. The slack matrix at larger n
+                requires emulation runs that take >10 minutes; cap
+                here keeps benchmark runs practical.
+
         Returns:
             Standard result dict (see _build_result).
         """
+        if self.n > _SLACK_MAX_N:
+            raise ValueError(
+                f"solve_qubo_slack capped at n <= {_SLACK_MAX_N} due "
+                f"to qubosolver LocalEmulator runtime explosion on "
+                f"the expanded slack matrix; got n={self.n}."
+            )
+
         from qubosolver import (
             LocalEmulator,
             QUBOInstance,

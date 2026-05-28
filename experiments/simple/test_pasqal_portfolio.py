@@ -161,6 +161,21 @@ def test_solve_qubo_slack_result_has_standard_shape(pdf_optimizer, require_qubos
         assert key in result
 
 
+def test_solve_qubo_slack_rejects_oversized_problem():
+    # n=9 must trigger the slack-matrix runtime cap before any
+    # qubosolver call. This test does NOT require qubosolver to be
+    # installed — the guard runs before the lazy import.
+    assets = [
+        {'id': f'A{i}', 'price': 0.5, 'duration': 1, 'score': 1}
+        for i in range(9)
+    ]
+    opt = PasqalPortfolioOptimizer(
+        assets=assets, budget=2.0, max_duration=5, max_cardinality=3,
+    )
+    with pytest.raises(ValueError, match="9"):
+        opt.solve_qubo_slack()
+
+
 # --- solve_mis ---
 
 
