@@ -132,6 +132,35 @@ def test_solve_qubo_energy_matches_selection(pdf_optimizer, require_qubosolver):
     assert abs(result['energy'] - expected) < 1e-6
 
 
+# --- solve_qubo_slack ---
+
+
+def test_solve_qubo_slack_runs_on_pdf_example(pdf_optimizer, require_qubosolver):
+    result = pdf_optimizer.solve_qubo_slack(seed=42)
+    # Selection bits are asset-only (slack bits stripped) so shape is n.
+    assert result['selection'].shape == (pdf_optimizer.n,)
+
+
+def test_solve_qubo_slack_returns_binary_selection(pdf_optimizer, require_qubosolver):
+    result = pdf_optimizer.solve_qubo_slack(seed=42)
+    assert set(result['selection'].tolist()).issubset({0, 1})
+
+
+def test_solve_qubo_slack_post_repair_yields_feasible(pdf_optimizer, require_qubosolver):
+    result = pdf_optimizer.solve_qubo_slack(seed=42)
+    assert result['is_feasible'] is True
+
+
+def test_solve_qubo_slack_result_has_standard_shape(pdf_optimizer, require_qubosolver):
+    result = pdf_optimizer.solve_qubo_slack(seed=42)
+    for key in (
+        'selection', 'selected_assets', 'energy',
+        'total_price', 'total_duration', 'total_score',
+        'num_selected', 'is_feasible',
+    ):
+        assert key in result
+
+
 # --- solve_mis ---
 
 

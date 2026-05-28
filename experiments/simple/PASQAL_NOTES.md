@@ -19,6 +19,30 @@ This row is comparable. Differences in score or runtime against the
 other QUBO rows are attributable to the backend, not the problem
 formulation.
 
+## Pasqal-Slack (comparable, but interesting tradeoff)
+
+Backend: `qubo-solver` 0.5.x with `LocalEmulator`, on the
+`SlackPortfolioQUBO` matrix instead of `SimplePortfolioQUBO`.
+
+The slack formulation converts each `≤` constraint into an `=`
+constraint via auxiliary binary slack variables — eliminating the
+"penalty pushes toward equality with target" bias of the simple
+penalty matrix. The resulting QUBO is mathematically more correct:
+its global minimum aligns with the true portfolio optimum (D-Wave
+SA confirms this on the same matrix).
+
+Caveat: the slack formulation produces a much larger QUBO matrix
+(asset bits + ~30 slack bits per constraint at default precision).
+Pasqal's local emulator scales poorly with problem size, so the
+default precision is set coarse (budget=1.0, duration=5.0) to keep
+runtimes around 3 s rather than the ~4 min that finer precision
+takes. With coarse precision, the matrix is correct but the
+emulator under-samples the larger state space — empirically this
+produces solutions that are sometimes WORSE than Pasqal-QUBO on
+small problems, despite the better formulation. A clean
+demonstration that solver quality matters as much as formulation
+quality, especially at scale.
+
 ## Pasqal-MIS (NOT directly comparable)
 
 Backend: `maximum-independent-set` 0.3.x with the local Qutip emulator.

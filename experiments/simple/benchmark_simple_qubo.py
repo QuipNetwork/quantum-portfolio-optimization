@@ -1259,7 +1259,41 @@ def run_benchmark(
             cardinality_satisfied=False, is_feasible=False
         ))
 
-    # 16. Pasqal-MIS — Max Independent Set on pairwise conflict graph (NOT comparable)
+    # 16. Pasqal-Slack — qubosolver on SlackPortfolioQUBO (slack-variable matrix)
+    if _HAS_PASQAL:
+        start = time.perf_counter()
+        pasqal_optimizer = PasqalPortfolioOptimizer(
+            assets=assets, **pasqal_constraints
+        )
+        try:
+            pasqal_slack_result = pasqal_optimizer.solve_qubo_slack()
+            pasqal_slack_time = (time.perf_counter() - start) * 1000
+            pasqal_slack_selection = [
+                i for i, x in enumerate(pasqal_slack_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "Pasqal-Slack", pasqal_slack_selection, pasqal_slack_time,
+                pasqal_slack_result.get('energy', 0.0)
+            ))
+        except Exception:
+            pasqal_slack_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="Pasqal-Slack", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=pasqal_slack_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="Pasqal-Slack", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
+    # 17. Pasqal-MIS — Max Independent Set on pairwise conflict graph (NOT comparable)
     if _HAS_PASQAL:
         start = time.perf_counter()
         pasqal_optimizer = PasqalPortfolioOptimizer(
@@ -1293,7 +1327,7 @@ def run_benchmark(
             cardinality_satisfied=False, is_feasible=False
         ))
 
-    # 17. Pasqal-Pulser — raw Rydberg adiabatic sequence (NOT comparable, n<=12)
+    # 18. Pasqal-Pulser — raw Rydberg adiabatic sequence (NOT comparable, n<=12)
     if _HAS_PASQAL:
         start = time.perf_counter()
         pasqal_optimizer = PasqalPortfolioOptimizer(
@@ -1532,7 +1566,7 @@ def main():
         print(f"Seed: {args.seed}")
 
     all_results = []
-    solver_names = ["QUBO (SA)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)", "QHD-QP", "QHD-SymPy", "cuOpt-MILP", "cuOpt-QP", "Phi-QUBO", "Phi-MIQP", "Pasqal-QUBO", "Pasqal-MIS", "Pasqal-Pulser"]
+    solver_names = ["QUBO (SA)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)", "QHD-QP", "QHD-SymPy", "cuOpt-MILP", "cuOpt-QP", "Phi-QUBO", "Phi-MIQP", "Pasqal-QUBO", "Pasqal-Slack", "Pasqal-MIS", "Pasqal-Pulser"]
 
     for trial in range(args.num_trials):
         if args.problem_set == "simple":

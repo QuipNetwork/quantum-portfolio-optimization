@@ -287,6 +287,84 @@ class PasqalPortfolioOptimizer:
         is_feasible = self._is_feasible(selection)
         return self._build_result(selection, energy, is_feasible)
 
+    def solve_qubo_slack(
+        self,
+        n_shots: int = 100,
+        seed: int = 42,
+        budget_precision: float = 1.0,
+        duration_precision: float = 5.0,
+    ) -> Dict[str, Any]:
+        """
+        Solve via qubosolver on the slack-variable QUBO matrix.
+
+        Uses SlackPortfolioQUBO instead of SimplePortfolioQUBO. The
+        slack formulation converts ≤ constraints into = constraints
+        via auxiliary slack variables, eliminating the
+        "penalty pushes toward equality" bias of the simple penalty
+        matrix. The resulting QUBO has more variables (n + slack
+        bits) but a global minimum that aligns with the true portfolio
+        optimum.
+
+        Args:
+            n_shots: Number of bitstring samples (unused by some
+                qubosolver backends; kept for API symmetry).
+            seed: RNG seed. Currently unused by LocalEmulator.
+            budget_precision: Slack discretization step for budget.
+                Smaller value = more slack bits = larger QUBO matrix
+                = much slower local emulation. Defaults are coarse
+                (1.0) since Pasqal's LocalEmulator scales poorly with
+                problem size; SlackPortfolioQUBO's own SA-based
+                default is 0.1 but that takes ~4 min/call here.
+            duration_precision: Same tradeoff (default 5.0; SA path
+                uses 1.0).
+
+        Returns:
+            Standard result dict (see _build_result).
+        """
+        from qubosolver import (
+            LocalEmulator,
+            QUBOInstance,
+            SolverConfig,
+        )
+        from qubosolver.solver import QuboSolver
+        from slack_portfolio_qubo import SlackPortfolioQUBO
+
+        slack_opt = SlackPortfolioQUBO(
+            assets=self.assets,
+            budget=self.budget,
+            max_duration=self.max_duration,
+            max_cardinality=self.max_cardinality,
+            lambda_budget=self._qubo_optimizer.lambda_b,
+            lambda_duration=self._qubo_optimizer.lambda_d,
+            lambda_cardinality=self._qubo_optimizer.lambda_c,
+            budget_precision=budget_precision,
+            duration_precision=duration_precision,
+        )
+
+        q_slack = np.triu(slack_opt.build_qubo_matrix())
+        instance = QUBOInstance(q_slack)
+        config = SolverConfig(use_quantum=True, backend=LocalEmulator())
+        solver = QuboSolver(instance, config)
+        solution = solver.solve()
+
+        if not len(solution.bitstrings):
+            raise RuntimeError(
+                "qubosolver LocalEmulator returned no bitstrings on "
+                "slack QUBO. Check QUBOInstance/SolverConfig or "
+                "upgrade qubosolver."
+            )
+
+        # Slack bitstring layout: first n bits are asset selections,
+        # remaining bits are budget/duration/cardinality slack
+        # variables. Strip the slack bits before scoring.
+        candidates = [
+            np.asarray(b, dtype=int)[: self.n] for b in solution.bitstrings
+        ]
+        selection = self._pick_best_feasible(candidates)
+        energy = self._compute_energy(selection)
+        is_feasible = self._is_feasible(selection)
+        return self._build_result(selection, energy, is_feasible)
+
     def _build_conflict_graph(self):
         """
         Build a pairwise asset-conflict graph for the MIS encoding.
