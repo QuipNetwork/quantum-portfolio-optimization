@@ -51,6 +51,7 @@ Usage:
     result = optimizer.solve(num_reads=1000)
 """
 
+import os
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional, Any
@@ -418,6 +419,66 @@ class SimplePortfolioQUBO:
         selected_assets = [self.assets[i].id for i in selected_indices]
 
         # Compute metrics for selected assets
+        total_price = np.sum(self.prices[selected_indices]) if len(selected_indices) > 0 else 0.0
+        total_duration = np.sum(self.durations[selected_indices]) if len(selected_indices) > 0 else 0.0
+        total_score = np.sum(self.scores[selected_indices]) if len(selected_indices) > 0 else 0.0
+
+        return {
+            'selection': selection,
+            'selected_assets': selected_assets,
+            'energy': best_energy,
+            'total_price': total_price,
+            'total_duration': total_duration,
+            'total_score': total_score,
+            'num_selected': len(selected_assets),
+            'sampleset': sampleset
+        }
+
+    def solve_qpu(
+        self,
+        num_reads: int = 1000,
+        solver: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Solve on a D-Wave QPU via DWaveCliqueSampler.
+
+        Submits the same BQM that solve() runs through simulated
+        annealing to real quantum-annealing hardware. The QUBO penalty
+        matrix is fully connected (every asset couples to every other),
+        so DWaveCliqueSampler — which uses pre-computed clique
+        embeddings — is the natural fit. Coefficients are auto-scaled
+        into the QPU's h/J ranges by the sampler (auto_scale=True).
+
+        Requires D-Wave Leap credentials. The token is read from
+        D-Wave's standard config chain (DWAVE_API_TOKEN env var or
+        dwave.conf); the solver name defaults to DWAVE_API_SOLVER or
+        'Advantage2_system1.6'.
+
+        Args:
+            num_reads: Number of QPU anneals.
+            solver: Explicit solver name. Defaults to the
+                DWAVE_API_SOLVER env var, then 'Advantage2_system1.6'.
+
+        Returns:
+            Same result dict shape as solve(), with 'sampleset' being
+            the QPU SampleSet (includes timing info in .info).
+        """
+        from dwave.system import DWaveCliqueSampler
+
+        bqm = self.to_bqm()
+        solver_name = solver or os.environ.get(
+            'DWAVE_API_SOLVER', 'Advantage2_system1.6'
+        )
+        sampler = DWaveCliqueSampler(solver=solver_name)
+        sampleset = sampler.sample(bqm, num_reads=num_reads)
+
+        best_sample = sampleset.first.sample
+        best_energy = sampleset.first.energy
+
+        selection = np.array([best_sample[asset.id] for asset in self.assets])
+        selected_indices = np.where(selection == 1)[0]
+        selected_assets = [self.assets[i].id for i in selected_indices]
+
         total_price = np.sum(self.prices[selected_indices]) if len(selected_indices) > 0 else 0.0
         total_duration = np.sum(self.durations[selected_indices]) if len(selected_indices) > 0 else 0.0
         total_score = np.sum(self.scores[selected_indices]) if len(selected_indices) > 0 else 0.0

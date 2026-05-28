@@ -30,6 +30,7 @@ Trade-offs vs Equality Formulation:
     - Larger QUBO matrix
 """
 
+import os
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional, Any
@@ -404,6 +405,77 @@ class SlackPortfolioQUBO:
         slack_values = self.decode_slack(full_selection)
 
         # Compute metrics
+        total_price = np.sum(self.prices[selected_indices]) if len(selected_indices) > 0 else 0.0
+        total_duration = np.sum(self.durations[selected_indices]) if len(selected_indices) > 0 else 0.0
+        total_score = np.sum(self.scores[selected_indices]) if len(selected_indices) > 0 else 0.0
+
+        return {
+            'selection': asset_selection,
+            'selected_assets': selected_assets,
+            'energy': best_energy,
+            'total_price': total_price,
+            'total_duration': total_duration,
+            'total_score': total_score,
+            'num_selected': len(selected_assets),
+            'slack_values': slack_values,
+            'sampleset': sampleset
+        }
+
+    def solve_qpu(
+        self,
+        num_reads: int = 1000,
+        solver: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Solve on a D-Wave QPU via DWaveCliqueSampler.
+
+        Submits the slack-variable BQM (assets + budget/duration/
+        cardinality slack bits) to real quantum-annealing hardware.
+        DWaveCliqueSampler handles the dense embedding; coefficients
+        are auto-scaled into the QPU's h/J ranges (auto_scale=True).
+
+        Requires D-Wave Leap credentials (DWAVE_API_TOKEN via env or
+        dwave.conf); solver defaults to DWAVE_API_SOLVER or
+        'Advantage2_system1.6'. Note the slack encoding uses more
+        qubits than the simple QUBO, so larger problems may exceed
+        the largest clique the QPU can embed.
+
+        Args:
+            num_reads: Number of QPU anneals.
+            solver: Explicit solver name. Defaults to the
+                DWAVE_API_SOLVER env var, then 'Advantage2_system1.6'.
+
+        Returns:
+            Same result dict shape as solve(), including slack_values
+            and the QPU SampleSet.
+        """
+        from dwave.system import DWaveCliqueSampler
+
+        bqm = self.to_bqm()
+        solver_name = solver or os.environ.get(
+            'DWAVE_API_SOLVER', 'Advantage2_system1.6'
+        )
+        sampler = DWaveCliqueSampler(solver=solver_name)
+        sampleset = sampler.sample(bqm, num_reads=num_reads)
+
+        best_sample = sampleset.first.sample
+        best_energy = sampleset.first.energy
+
+        asset_selection = np.array([best_sample[a.id] for a in self.assets])
+        selected_indices = np.where(asset_selection == 1)[0]
+        selected_assets = [self.assets[i].id for i in selected_indices]
+
+        var_names = [a.id for a in self.assets]
+        for k in range(self.budget_slack_bits):
+            var_names.append(f'sb{k}')
+        for k in range(self.duration_slack_bits):
+            var_names.append(f'sd{k}')
+        for k in range(self.cardinality_slack_bits):
+            var_names.append(f'sc{k}')
+
+        full_selection = np.array([best_sample[v] for v in var_names])
+        slack_values = self.decode_slack(full_selection)
+
         total_price = np.sum(self.prices[selected_indices]) if len(selected_indices) > 0 else 0.0
         total_duration = np.sum(self.durations[selected_indices]) if len(selected_indices) > 0 else 0.0
         total_score = np.sum(self.scores[selected_indices]) if len(selected_indices) > 0 else 0.0
