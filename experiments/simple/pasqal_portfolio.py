@@ -751,3 +751,130 @@ class PasqalPortfolioOptimizer:
         energy = self._compute_energy(selection)
         is_feasible = self._is_feasible(selection)
         return self._build_result(selection, energy, is_feasible)
+
+
+# Sampling each emulator path performs, for the demo summary. These are
+# fixed by the backend, not by our n_shots argument (which the lazy
+# imports document as unused / ignored):
+#   - Pasqal-QUBO / Slack: shots are set inside qubosolver's
+#     LocalEmulator() default; we pass no shot count, and solve_qubo's
+#     n_shots is documented as unused.
+#   - Pasqal-MIS:    runs=100 on the Qutip emulator (see solve_mis).
+#   - Pasqal-Pulser: 1000 shots — Pulser's EmulationConfig
+#     default_num_shots for the BitStrings observable; our n_shots is
+#     not forwarded to QutipBackendV2.
+_PATH_SAMPLING = {
+    "Pasqal-QUBO": "qubosolver LocalEmulator default shots (n_shots ignored)",
+    "Pasqal-Slack": "qubosolver LocalEmulator default shots (n_shots ignored)",
+    "Pasqal-MIS": "100 runs (Qutip emulator)",
+    "Pasqal-Pulser": "1000 shots (Pulser default_num_shots; n_shots ignored)",
+}
+
+
+def _demo_main():
+    """Run ONLY the Pasqal solver paths on one problem, with QUBO info.
+
+    Standalone entrypoint so you can iterate on the Pasqal paths without
+    running the full multi-solver benchmark. The simple and slack QUBO
+    matrices are always printed first (the --no-qubo flag suppresses
+    them). Optional solver libs that aren't installed are reported as
+    SKIPPED rather than failing the run.
+    """
+    import argparse
+    import time
+
+    parser = argparse.ArgumentParser(
+        description="Run only the Pasqal portfolio solver paths."
+    )
+    parser.add_argument(
+        "--num-assets",
+        type=int,
+        default=None,
+        help="Random problem of this size; default uses the 5-asset "
+             "example problem.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for the random problem (default: 42).",
+    )
+    parser.add_argument(
+        "--no-qubo",
+        action="store_true",
+        help="Skip the QUBO / slack-QUBO matrix display.",
+    )
+    args = parser.parse_args()
+
+    if args.num_assets is None:
+        assets = get_example_assets()
+        constraints = get_example_constraints()
+        title = "Simple Example Problem (n=5)"
+    else:
+        from benchmark_simple_qubo import generate_random_problem
+        assets, constraints = generate_random_problem(
+            args.num_assets, seed=args.seed
+        )
+        title = f"Random Problem (n={args.num_assets}, seed={args.seed})"
+
+    print("=" * 100)
+    print(" Pasqal-Only Portfolio Solver Run")
+    print("=" * 100)
+    print(f"Problem: {title}")
+    print(f"  Assets: {len(assets)}")
+    print(f"  Budget target: ${constraints['budget']:.2f}")
+    print(f"  Max duration: {constraints['max_duration']}")
+    print(f"  Max cardinality: {constraints['max_cardinality']}")
+
+    # show_qubo is enabled automatically (per request); reuse the
+    # benchmark's display so output matches `--show-qubo` exactly.
+    if not args.no_qubo:
+        from benchmark_simple_qubo import print_qubo_info, print_slack_qubo_info
+        print_qubo_info(assets, constraints)
+        print_slack_qubo_info(assets, constraints)
+
+    optimizer = PasqalPortfolioOptimizer(
+        assets=assets,
+        budget=constraints['budget'],
+        max_duration=constraints['max_duration'],
+        max_cardinality=constraints['max_cardinality'],
+        lambda_budget=constraints.get('lambda_budget', 2.0),
+        lambda_duration=constraints.get('lambda_duration', 10.0),
+        lambda_cardinality=constraints.get('lambda_cardinality', 5.0),
+    )
+
+    paths = [
+        ("Pasqal-QUBO", optimizer.solve_qubo),
+        ("Pasqal-Slack", optimizer.solve_qubo_slack),
+        ("Pasqal-MIS", optimizer.solve_mis),
+        ("Pasqal-Pulser", optimizer.solve_pulser),
+    ]
+
+    width = 100
+    print("=" * width)
+    print(" Pasqal Solver Results")
+    print("=" * width)
+    print(f"{'Path':<16}{'Score':>8}{'Feasible':>10}{'Time(ms)':>10}  "
+          f"{'Picks':<18}Sampling")
+    print("-" * width)
+    for name, fn in paths:
+        start = time.perf_counter()
+        try:
+            r = fn()
+            elapsed = (time.perf_counter() - start) * 1000
+            picks = ",".join(r['selected_assets']) or "(none)"
+            print(f"{name:<16}{r['total_score']:>8.1f}"
+                  f"{str(r['is_feasible']):>10}{elapsed:>10.1f}  "
+                  f"{picks:<18}{_PATH_SAMPLING[name]}")
+        except ImportError as e:
+            print(f"{name:<16}{'SKIPPED':>8}{'—':>10}{'—':>10}  "
+                  f"{'(lib missing)':<18}{e}")
+        except Exception as e:
+            elapsed = (time.perf_counter() - start) * 1000
+            print(f"{name:<16}{'FAIL':>8}{'—':>10}{elapsed:>10.1f}  "
+                  f"{'':<18}{type(e).__name__}: {e}")
+    print("-" * width)
+
+
+if __name__ == "__main__":
+    _demo_main()
