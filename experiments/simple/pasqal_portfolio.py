@@ -27,6 +27,47 @@ are directly comparable to the other QUBO rows in the benchmark
 completeness and should be read with the caveats below.
 
 
+Why an arbitrary QUBO underperforms on neutral atoms
+----------------------------------------------------
+
+The same portfolio QUBO matrix solves to the optimum on classical
+simulated annealing AND on a real D-Wave Advantage2 QPU, but only
+reaches ~80% of optimum on Pasqal-QUBO. The difference is NOT
+"embedding is hard" (D-Wave embeds too) — it is whether the
+machine's couplings are independently PROGRAMMABLE:
+
+  - D-Wave is a programmable Ising machine. Its problem Hamiltonian
+    is H = Σ h_i s_i + Σ J_ij s_i s_j, and every h_i and J_ij is an
+    independent dial. Minor-embedding maps each logical variable to
+    a chain of physical qubits; the logical couplings are realized
+    exactly on inter-chain couplers. As long as chains don't break,
+    the embedded ground state IS the logical ground state. So
+    QUBO-on-QPU == QUBO-on-SA == optimum.
+
+  - Pasqal is an analog simulator with GEOMETRIC interactions. The
+    Rydberg coupling V_ij = C6 / r_ij^6 is fixed by the physical
+    distance between atoms — you place atoms, physics sets the
+    couplings. It is always positive (repulsive), decays as 1/r^6,
+    and is geometrically coupled (moving one atom changes all its
+    pairwise interactions). An arbitrary QUBO coupling matrix (mixed
+    signs, arbitrary magnitudes, all-to-all) cannot be realized
+    exactly. qubosolver's greedy triangular-lattice embedding finds
+    a best-fit atom layout that APPROXIMATES the couplings, and that
+    approximation shifts the energy-landscape minimum off the true
+    optimum. (Per-atom detuning via the DMM handles the linear/
+    diagonal terms; it's the quadratic couplings that can't be
+    realized.)
+
+This is exactly why solve_mis works far better than solve_qubo:
+Maximum Independent Set is the NATIVE Rydberg problem (blockade =
+independence), so it maps onto the hardware with no approximation.
+Match the encoding to the hardware's native interaction and Pasqal
+shines; force an arbitrary QUBO onto it and the geometric
+approximation costs you. (D-Wave's analogue of this wall is chain
+breaks in minor-embedding, which is why Pasqal-Slack AND the larger
+QUBO-Slack-QPU row both degrade as variable count grows.)
+
+
 Pasqal-QUBO (solve_qubo) — comparable
 -------------------------------------
 
@@ -721,6 +762,11 @@ class PasqalPortfolioOptimizer:
         register, device, _blockade = self._build_pulser_register()
         sequence = self._build_adiabatic_sequence(register, device)
 
+        # Hardware-equivalent time: the pulse-sequence duration (ns -> ms)
+        # that this protocol would take on real neutral-atom hardware,
+        # independent of the classical Qutip emulation wall-clock.
+        hardware_time_ms = sequence.get_duration() / 1e6
+
         backend = QutipBackendV2(sequence)
         result = backend.run()
 
@@ -750,4 +796,6 @@ class PasqalPortfolioOptimizer:
         selection = self._round_and_repair(raw.astype(float))
         energy = self._compute_energy(selection)
         is_feasible = self._is_feasible(selection)
-        return self._build_result(selection, energy, is_feasible)
+        result = self._build_result(selection, energy, is_feasible)
+        result['hardware_time_ms'] = hardware_time_ms
+        return result

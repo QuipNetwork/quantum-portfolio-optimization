@@ -105,6 +105,10 @@ class BenchmarkResult:
     duration_satisfied: bool
     cardinality_satisfied: bool
     is_feasible: bool
+    # When True, runtime_ms is hardware time (D-Wave QPU access time or
+    # Pasqal pulse-sequence duration), not wall-clock. Marked with * in
+    # the table.
+    hw_time: bool = False
 
 
 @dataclass
@@ -737,9 +741,9 @@ def slack_qubo_solve_filtered(
 def run_benchmark(
     assets: List[Dict[str, Any]],
     constraints: Dict[str, Any],
-    qubo_num_reads: int = 1000,
+    qubo_num_reads: int = 64,
     random_samples: int = 1000,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
 ) -> List[BenchmarkResult]:
     """
     Run all solvers on a single problem instance.
@@ -756,7 +760,7 @@ def run_benchmark(
     asset_ids = [a['id'] for a in assets]
     n = len(assets)
 
-    def make_result(name: str, selected_indices: List[int], runtime_ms: float, energy: float = 0.0) -> BenchmarkResult:
+    def make_result(name: str, selected_indices: List[int], runtime_ms: float, energy: float = 0.0, hw_time: bool = False) -> BenchmarkResult:
         if not selected_indices:
             return BenchmarkResult(
                 solver_name=name,
@@ -770,7 +774,8 @@ def run_benchmark(
                 budget_satisfied=False,
                 duration_satisfied=True,
                 cardinality_satisfied=True,
-                is_feasible=False
+                is_feasible=False,
+                hw_time=hw_time
             )
 
         total_price = float(np.sum(prices[selected_indices]))
@@ -794,6 +799,7 @@ def run_benchmark(
             budget_satisfied=budget_ok,
             duration_satisfied=duration_ok,
             cardinality_satisfied=cardinality_ok,
+            hw_time=hw_time,
             is_feasible=budget_ok and duration_ok and cardinality_ok
         )
 
@@ -815,10 +821,13 @@ def run_benchmark(
         try:
             qpu_optimizer = SimplePortfolioQUBO(assets=assets, **constraints)
             qpu_result = qpu_optimizer.solve_qpu(num_reads=qubo_num_reads)
-            qpu_time = (time.perf_counter() - start) * 1000
+            # Report actual QPU access time (hardware), not wall-clock.
+            qpu_hw_ms = qpu_result.get('qpu_access_ms')
+            qpu_time = qpu_hw_ms if qpu_hw_ms is not None else (time.perf_counter() - start) * 1000
             qpu_selection = [i for i, x in enumerate(qpu_result['selection']) if x == 1]
             results.append(make_result(
-                "QUBO (QPU)", qpu_selection, qpu_time, qpu_result['energy']
+                "QUBO (QPU)", qpu_selection, qpu_time, qpu_result['energy'],
+                hw_time=qpu_hw_ms is not None
             ))
         except Exception:
             qpu_time = (time.perf_counter() - start) * 1000
@@ -885,13 +894,14 @@ def run_benchmark(
         try:
             slack_qpu_optimizer = SlackPortfolioQUBO(assets=assets, **slack_constraints)
             slack_qpu_result = slack_qpu_optimizer.solve_qpu(num_reads=qubo_num_reads)
-            slack_qpu_time = (time.perf_counter() - start) * 1000
+            slack_qpu_hw_ms = slack_qpu_result.get('qpu_access_ms')
+            slack_qpu_time = slack_qpu_hw_ms if slack_qpu_hw_ms is not None else (time.perf_counter() - start) * 1000
             slack_qpu_selection = [
                 i for i, x in enumerate(slack_qpu_result['selection']) if x == 1
             ]
             results.append(make_result(
                 "QUBO (Slack QPU)", slack_qpu_selection, slack_qpu_time,
-                slack_qpu_result['energy']
+                slack_qpu_result['energy'], hw_time=slack_qpu_hw_ms is not None
             ))
         except Exception:
             slack_qpu_time = (time.perf_counter() - start) * 1000
@@ -1411,13 +1421,17 @@ def run_benchmark(
         )
         try:
             pasqal_pulser_result = pasqal_optimizer.solve_pulser(n_shots=50)
-            pasqal_pulser_time = (time.perf_counter() - start) * 1000
+            # Report the pulse-sequence duration (hardware time), not the
+            # Qutip emulation wall-clock.
+            pasqal_pulser_hw_ms = pasqal_pulser_result.get('hardware_time_ms')
+            pasqal_pulser_time = pasqal_pulser_hw_ms if pasqal_pulser_hw_ms is not None else (time.perf_counter() - start) * 1000
             pasqal_pulser_selection = [
                 i for i, x in enumerate(pasqal_pulser_result['selection']) if x == 1
             ]
             results.append(make_result(
                 "Pasqal-Pulser", pasqal_pulser_selection, pasqal_pulser_time,
-                pasqal_pulser_result.get('energy', 0.0)
+                pasqal_pulser_result.get('energy', 0.0),
+                hw_time=pasqal_pulser_hw_ms is not None
             ))
         except Exception:
             pasqal_pulser_time = (time.perf_counter() - start) * 1000
@@ -1500,6 +1514,10 @@ def print_results_table(results: List[BenchmarkResult], title: str = "Benchmark 
         else:
             gap_str = "    N/A"
 
+        # Hardware-time rows (D-Wave QPU access time, Pasqal pulse
+        # duration) are marked with * to distinguish them from wall-clock.
+        time_str = f"{r.runtime_ms:.2f}{'*' if r.hw_time else ''}"
+
         row = (
             f"{r.solver_name:<15} "
             f"{r.total_score:>8.1f} "
@@ -1511,11 +1529,16 @@ def print_results_table(results: List[BenchmarkResult], title: str = "Benchmark 
             f"{dur_str:>6} "
             f"{card_str:>6} "
             f"{feas_str:>6} "
-            f"{r.runtime_ms:>10.2f}"
+            f"{time_str:>10}"
         )
         print(row)
 
     print("-" * 110)
+
+    # Legend for the hardware-time marker, only when present.
+    if any(r.hw_time for r in results):
+        print("* Time(ms) is hardware time (D-Wave QPU access time or Pasqal "
+              "pulse-sequence duration), not wall-clock.")
 
     # Find best feasible solution
     if feasible:
@@ -1608,8 +1631,9 @@ def main():
     parser.add_argument(
         "--qubo-reads",
         type=int,
-        default=1000,
-        help="Number of QUBO annealing reads (default: 1000)"
+        default=64,
+        help="Number of annealing reads for SA and QPU rows (default: 64; "
+             "bump for larger random problems where SA needs more samples)"
     )
     parser.add_argument(
         "--random-samples",
