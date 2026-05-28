@@ -807,24 +807,33 @@ def run_benchmark(
     results.append(make_result("QUBO (SA)", selected_indices, qubo_time, qubo_result['energy']))
 
     # 1a-qpu. QUBO (QPU) - same BQM as QUBO (SA), on real D-Wave hardware
-    # via DWaveCliqueSampler. Requires Leap credentials (.env / DWAVE_*);
-    # falls back to a FAIL row when unavailable, like the other optional
-    # solvers.
-    start = time.perf_counter()
-    try:
-        qpu_optimizer = SimplePortfolioQUBO(assets=assets, **constraints)
-        qpu_result = qpu_optimizer.solve_qpu(num_reads=qubo_num_reads)
-        qpu_time = (time.perf_counter() - start) * 1000
-        qpu_selection = [i for i, x in enumerate(qpu_result['selection']) if x == 1]
-        results.append(make_result(
-            "QUBO (QPU)", qpu_selection, qpu_time, qpu_result['energy']
-        ))
-    except Exception:
-        qpu_time = (time.perf_counter() - start) * 1000
+    # via DWaveCliqueSampler. Only attempted when DWAVE_API_TOKEN is set
+    # (via .env or the shell) so routine/multi-trial runs don't submit to
+    # the QPU and consume Leap budget unless credentials are configured.
+    if os.environ.get('DWAVE_API_TOKEN'):
+        start = time.perf_counter()
+        try:
+            qpu_optimizer = SimplePortfolioQUBO(assets=assets, **constraints)
+            qpu_result = qpu_optimizer.solve_qpu(num_reads=qubo_num_reads)
+            qpu_time = (time.perf_counter() - start) * 1000
+            qpu_selection = [i for i, x in enumerate(qpu_result['selection']) if x == 1]
+            results.append(make_result(
+                "QUBO (QPU)", qpu_selection, qpu_time, qpu_result['energy']
+            ))
+        except Exception:
+            qpu_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="QUBO (QPU)", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=qpu_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
         results.append(BenchmarkResult(
             solver_name="QUBO (QPU)", selected_assets=[], total_score=0.0,
             total_price=0.0, total_duration=0.0, num_selected=0,
-            energy=0.0, runtime_ms=qpu_time,
+            energy=0.0, runtime_ms=0.0,
             budget_satisfied=False, duration_satisfied=False,
             cardinality_satisfied=False, is_feasible=False
         ))
@@ -869,26 +878,35 @@ def run_benchmark(
 
     # 1d-qpu. QUBO (Slack QPU) - slack BQM on real D-Wave hardware via
     # DWaveCliqueSampler. Uses more qubits than the simple QUBO, so may
-    # exceed the largest embeddable clique on larger problems. Requires
-    # Leap credentials; FAIL row otherwise.
-    start = time.perf_counter()
-    try:
-        slack_qpu_optimizer = SlackPortfolioQUBO(assets=assets, **slack_constraints)
-        slack_qpu_result = slack_qpu_optimizer.solve_qpu(num_reads=qubo_num_reads)
-        slack_qpu_time = (time.perf_counter() - start) * 1000
-        slack_qpu_selection = [
-            i for i, x in enumerate(slack_qpu_result['selection']) if x == 1
-        ]
-        results.append(make_result(
-            "QUBO (Slack QPU)", slack_qpu_selection, slack_qpu_time,
-            slack_qpu_result['energy']
-        ))
-    except Exception:
-        slack_qpu_time = (time.perf_counter() - start) * 1000
+    # exceed the largest embeddable clique on larger problems. Only
+    # attempted when DWAVE_API_TOKEN is set (see QUBO (QPU) above).
+    if os.environ.get('DWAVE_API_TOKEN'):
+        start = time.perf_counter()
+        try:
+            slack_qpu_optimizer = SlackPortfolioQUBO(assets=assets, **slack_constraints)
+            slack_qpu_result = slack_qpu_optimizer.solve_qpu(num_reads=qubo_num_reads)
+            slack_qpu_time = (time.perf_counter() - start) * 1000
+            slack_qpu_selection = [
+                i for i, x in enumerate(slack_qpu_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "QUBO (Slack QPU)", slack_qpu_selection, slack_qpu_time,
+                slack_qpu_result['energy']
+            ))
+        except Exception:
+            slack_qpu_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="QUBO (Slack QPU)", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=slack_qpu_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
         results.append(BenchmarkResult(
             solver_name="QUBO (Slack QPU)", selected_assets=[], total_score=0.0,
             total_price=0.0, total_duration=0.0, num_selected=0,
-            energy=0.0, runtime_ms=slack_qpu_time,
+            energy=0.0, runtime_ms=0.0,
             budget_satisfied=False, duration_satisfied=False,
             cardinality_satisfied=False, is_feasible=False
         ))
