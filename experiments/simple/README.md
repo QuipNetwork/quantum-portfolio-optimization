@@ -6,15 +6,45 @@ This document describes an implementation of QUBO matrix construction for portfo
 
 ## Installation
 
+### Core dependencies (required for QUBO/Slack/CQM/NL paths)
+
 ```bash
 python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install numpy dimod dwave-neal scipy pytest
+pip install numpy dimod dwave-neal dwave-system dwave-optimization scipy pytest
 ```
 
-**Note**: 
 - `dimod` - D-Wave's binary quadratic model (BQM) library
 - `dwave-neal` - Simulated annealing sampler for QUBO/Ising problems
+- `dwave-system` - D-Wave QPU access (only needed for live hardware runs)
+- `dwave-optimization` - Non-linear (NL) model used by `nl_portfolio.py`
+
+### Optional solver dependencies
+
+The benchmark wires up several optional solver integrations. Each is
+imported lazily, so the rest of the suite runs cleanly without any of
+them. To populate the corresponding benchmark rows, install the ones
+you want:
+
+```bash
+# QHDOPT (CPU)
+pip install qhdopt                # Python 3.10-3.12
+# On Python 3.13, see linux-instructions.md §3 for the --no-deps workaround.
+
+# OpenPhiSolve (from source, CPU or GPU)
+git clone https://github.com/Artephi-Computing/OpenPhiSolve.git
+pip install -e ./OpenPhiSolve
+
+# Pasqal stack (CPU emulators only)
+pip install qubo-solver maximum-independent-set pulser pulser-simulation qutip
+
+# NVIDIA cuOpt (Linux + CUDA 12.x)
+pip install --extra-index-url=https://pypi.nvidia.com \
+    "cuopt-cu12" "nvidia-nvjitlink-cu12" "rapids-logger"
+```
+
+Full instructions, troubleshooting, and Python-version notes are in
+`linux-instructions.md` at the repo root.
 
 ## Running the Code
 
@@ -35,12 +65,34 @@ python benchmark_simple_qubo.py --problem-set random --num-assets 12 --num-trial
 
 All files are located in `experiments/simple/`:
 
-- `simple_portfolio_qubo.py` - Main implementation (soft constraints)
-- `slack_portfolio_qubo.py` - Slack variable implementation (with full inequalities)
+Core implementations:
+- `simple_portfolio_qubo.py` - Soft-constraint QUBO (penalty matrix)
+- `slack_portfolio_qubo.py` - Slack-variable QUBO (true inequalities)
+- `cqm_portfolio.py` - D-Wave ConstrainedQuadraticModel
+- `nl_portfolio.py` - D-Wave non-linear (NL) model for Stride hybrid
+
+Optional solver integrations (lazy imports; install per "Optional
+solver dependencies" above):
+- `qhd_portfolio.py` - QHDOPT (continuous relaxation of QUBO)
+- `cuopt_portfolio.py` - NVIDIA cuOpt (GPU MILP + QP)
+- `phi_portfolio.py` - OpenPhiSolve (QIHD + PDQP refinement)
+- `pasqal_portfolio.py` - Pasqal neutral-atom stack (qubosolver,
+  slack-QUBO, MIS, raw Pulser)
+
+Benchmark and tests:
 - `benchmark_simple_qubo.py` - Benchmark comparing all solvers
-- `test_simple_portfolio_qubo.py` - Test suite (45 tests)
-- `test_slack_portfolio_qubo.py` - Slack variable tests (24 tests)
-- `SIMPLE.md` - This documentation
+- `test_simple_portfolio_qubo.py` - Simple-QUBO tests (45)
+- `test_slack_portfolio_qubo.py` - Slack-QUBO tests (24)
+- `test_cqm_portfolio.py` - CQM tests (23)
+- `test_nl_portfolio.py` - NL tests (31)
+- `test_qhd_portfolio.py` - QHDOPT tests (28)
+- `test_cuopt_portfolio.py` - cuOpt tests (skip without cuopt)
+- `test_phi_portfolio.py` - PhiSolve tests (30)
+- `test_pasqal_portfolio.py` - Pasqal tests (28)
+
+Documentation:
+- `README.md` - This file
+- `linux-instructions.md` (at repo root) - Install and setup details
 
 # Technical Explanation
 
@@ -234,18 +286,51 @@ Equality formulation is mathematically elegant but impractical:
 - Selecting fewer assets (even if optimal) incurs cardinality penalty
 - This causes QUBO to find solutions that violate constraints in practice
 
-### Two Implementation Approaches
+### Solver implementations in this directory
 
-**Simple (Soft Constraint) - `simple_portfolio_qubo.py`:**
-- Uses quadratic penalty formulation
-- Checks constraints post-hoc using ≤ inequalities
-- Fast but may produce infeasible solutions (use filtering)
+Core (always available):
 
-**Slack Variable - `slack_portfolio_qubo.py`:**
-- Introduces binary slack variables to encode true inequalities
-- Converts Σ p_i x_i ≤ B to Σ p_i x_i + s = B where s ≥ 0
-- No penalty for under-budget solutions
-- More qubits but higher quality feasible solutions
+- **Simple (soft penalty) - `simple_portfolio_qubo.py`**: Quadratic
+  penalty formulation, checks constraints post-hoc as ≤ inequalities.
+  Fast but may produce infeasible solutions (use filtering).
+- **Slack variable - `slack_portfolio_qubo.py`**: Binary slack
+  variables encode true inequalities (`Σp_ix_i + s = B`, `s ≥ 0`).
+  No penalty for under-budget solutions. More qubits but higher
+  quality.
+- **CQM - `cqm_portfolio.py`**: `dimod.ConstrainedQuadraticModel`
+  with native inequality constraints. `solve_exact()` and `solve_sa()`
+  paths.
+- **NL - `nl_portfolio.py`**: `dwave-optimization.Model` tensor-DAG
+  formulation. Inequalities are first-class; targets D-Wave's Stride
+  hybrid solver (`LeapHybridNLSampler`) which scales to ~2M
+  variables.
+
+Optional solver integrations (lazy imports; benchmark rows fall back
+to FAIL when the library is absent):
+
+- **QHDOPT - `qhd_portfolio.py`**: Two paths. `solve_qp` runs QHDOPT's
+  Quadratic Programming relaxation on the QUBO penalty matrix.
+  `solve_sympy` uses QHDOPT's native SymPy-based MIQP formulation
+  with explicit linear constraints (consistently competitive on
+  benchmarks).
+- **cuOpt - `cuopt_portfolio.py`**: NVIDIA's GPU optimizer. `solve_milp`
+  for binary integer programming (matches ILP on score, faster at
+  scale); `solve_qp` for an LP relaxation of the indefinite QUBO
+  penalty matrix.
+- **PhiSolve - `phi_portfolio.py`**: Artephi Computing's
+  Quantum-Inspired Hamiltonian Descent (QIHD) with PDQP refinement.
+  `solve_qubo` on the penalty matrix; `solve_miqp` with native
+  linear constraints.
+- **Pasqal - `pasqal_portfolio.py`**: Four paths on the neutral-atom
+  stack, all running on local emulators. `solve_qubo` (qubosolver
+  LocalEmulator on the QUBO penalty matrix), `solve_qubo_slack`
+  (qubosolver on the slack-variable matrix; capped at n ≤ 8 due to
+  emulator scaling), `solve_mis` (Maximum Independent Set on a
+  pairwise budget/duration conflict graph plus score-aware greedy
+  post-selection), `solve_pulser` (hand-built Rydberg adiabatic
+  pulse sequence; capped at n ≤ 12 by Qutip emulation cost).
+  Comparability and encoding caveats are in the module docstring
+  at the top of `pasqal_portfolio.py`.
 
 # Implementation Details
 
@@ -354,16 +439,57 @@ There is a separate test suite (`test_slack_portfolio_qubo.py`) for the slack va
 
 ## Benchmark Results
 
-On random 12-asset problems with 1000 annealing reads:
+Two representative runs from the current benchmark
+(`benchmark_simple_qubo.py`). Optional solvers (QHD, cuOpt, Phi,
+Pasqal) only produce real numbers when their respective libraries
+are installed; cuOpt requires NVIDIA hardware.
 
-| Solver | Avg Gap% | Feasibility |
-|--------|----------|-------------|
-| QUBO (Filtered) | 35.4% | 66.7% |
-| QUBO (HighPen) | 31.9% | 100% |
-| **QUBO (Slack+Filter)** | **0.5%** | **100%** |
-| ILP (exact) | 0.0% | 100% |
+### Simple PDF example (n = 5, optimum = 17.0, pick A + E)
 
-The slack variable formulation achieves near-optimal solutions with 100% feasibility.
+| Solver | Score | Gap% | Time (ms) |
+|---|---:|---:|---:|
+| Brute Force / ILP / CQM-Exact / NL-Exact | 17.0 | 0.0% | 0.1–186 |
+| QUBO (SA / Filtered / HighPen / Slack / Slack+Filt) | 17.0 | 0.0% | 35–136 |
+| Greedy / Random | 17.0 | 0.0% | <10 |
+| QHD-SymPy, Phi-MIQP (native-constraint MIQP) | 17.0 | 0.0% | 63–3245 |
+| **Pasqal-Pulser** | 17.0 | 0.0% | 40 |
+| **Pasqal-QUBO**, **Pasqal-MIS** | 14.0 | 17.6% | 13–2200 |
+| **Pasqal-Slack** | 13.0 | 23.5% | 3089 |
+| QHD-QP, Phi-QUBO (QUBO penalty matrix on QI backends) | 9.0 | 47.1% | 150–2050 |
+
+### Random n = 12 (optimum = 70.0)
+
+| Solver | Score | Gap% | Time (ms) |
+|---|---:|---:|---:|
+| Brute Force / ILP / CQM-Exact / NL-Exact | 70.0 | 0.0% | 3–184 |
+| QHD-SymPy, Phi-MIQP | 70.0 | 0.0% | 84–3281 |
+| **Pasqal-MIS** | 70.0 | 0.0% | 25 |
+| QUBO (Slack+Filt) | 69.0 | 1.4% | 267 |
+| Random / Greedy | 62–68 | 2.9–11.4% | <10 |
+| **Pasqal-Pulser** | 58.0 | 17.1% | 810 |
+| **Pasqal-QUBO** | 55.0 | 21.4% | 14000 |
+| **Pasqal-Slack** | — | skipped | n > 8 cap |
+| CQM (SA) / QHD-QP / Phi-QUBO | 11–37 | 47–84% | 165–3281 |
+| QUBO (SA), QUBO (Slack) | infeasible | — | 120–260 |
+
+A few observations from these runs:
+
+- The MIQP-style native-constraint solvers (CQM-Exact, NL-Exact,
+  QHD-SymPy, Phi-MIQP) consistently match ILP at these sizes.
+  Pasqal-MIS is the speed surprise: 25 ms to the global optimum at
+  n = 12 via a pairwise conflict-graph relaxation.
+- The QUBO-penalty-matrix solvers on quantum-inspired backends
+  (QHD-QP, Phi-QUBO, Pasqal-QUBO) cluster together at the
+  high-gap end. Same energy landscape, different backends, very
+  similar quality — a property of the penalty-matrix formulation
+  rather than the backends.
+- At n = 12, soft-penalty QUBO (SA, Slack) starts producing
+  infeasible solutions. Slack-with-filter recovers feasibility at
+  the cost of a small gap.
+
+The original "slack achieves 0.5% gap" result still reproduces on
+QUBO (Slack+Filter); the wider table here shows where the optional
+solvers slot in once they're installed.
 
 # D-Wave API Details
 
