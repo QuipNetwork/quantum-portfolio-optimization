@@ -106,9 +106,12 @@ class BenchmarkResult:
     cardinality_satisfied: bool
     is_feasible: bool
     # When True, runtime_ms is hardware time (D-Wave QPU access time or
-    # Pasqal pulse-sequence duration), not wall-clock. Marked with * in
-    # the table.
+    # estimated Pasqal register-cycle time), not wall-clock. Marked with *
+    # in the table. pure_hw_time_ms, if set, is the pure coherent-evolution
+    # time (D-Wave per-sample anneal / Pasqal pulse duration), shown in
+    # parentheses.
     hw_time: bool = False
+    pure_hw_time_ms: Optional[float] = None
 
 
 @dataclass
@@ -760,7 +763,7 @@ def run_benchmark(
     asset_ids = [a['id'] for a in assets]
     n = len(assets)
 
-    def make_result(name: str, selected_indices: List[int], runtime_ms: float, energy: float = 0.0, hw_time: bool = False) -> BenchmarkResult:
+    def make_result(name: str, selected_indices: List[int], runtime_ms: float, energy: float = 0.0, hw_time: bool = False, pure_hw_time_ms: Optional[float] = None) -> BenchmarkResult:
         if not selected_indices:
             return BenchmarkResult(
                 solver_name=name,
@@ -775,7 +778,8 @@ def run_benchmark(
                 duration_satisfied=True,
                 cardinality_satisfied=True,
                 is_feasible=False,
-                hw_time=hw_time
+                hw_time=hw_time,
+                pure_hw_time_ms=pure_hw_time_ms
             )
 
         total_price = float(np.sum(prices[selected_indices]))
@@ -800,6 +804,7 @@ def run_benchmark(
             duration_satisfied=duration_ok,
             cardinality_satisfied=cardinality_ok,
             hw_time=hw_time,
+            pure_hw_time_ms=pure_hw_time_ms,
             is_feasible=budget_ok and duration_ok and cardinality_ok
         )
 
@@ -821,13 +826,15 @@ def run_benchmark(
         try:
             qpu_optimizer = SimplePortfolioQUBO(assets=assets, **constraints)
             qpu_result = qpu_optimizer.solve_qpu(num_reads=qubo_num_reads)
-            # Report actual QPU access time (hardware), not wall-clock.
+            # Primary = total QPU access time (hardware); parenthetical =
+            # per-sample anneal time. Both real measurements.
             qpu_hw_ms = qpu_result.get('qpu_access_ms')
             qpu_time = qpu_hw_ms if qpu_hw_ms is not None else (time.perf_counter() - start) * 1000
             qpu_selection = [i for i, x in enumerate(qpu_result['selection']) if x == 1]
             results.append(make_result(
                 "QUBO (QPU)", qpu_selection, qpu_time, qpu_result['energy'],
-                hw_time=qpu_hw_ms is not None
+                hw_time=qpu_hw_ms is not None,
+                pure_hw_time_ms=qpu_result.get('qpu_anneal_ms')
             ))
         except Exception:
             qpu_time = (time.perf_counter() - start) * 1000
@@ -901,7 +908,8 @@ def run_benchmark(
             ]
             results.append(make_result(
                 "QUBO (Slack QPU)", slack_qpu_selection, slack_qpu_time,
-                slack_qpu_result['energy'], hw_time=slack_qpu_hw_ms is not None
+                slack_qpu_result['energy'], hw_time=slack_qpu_hw_ms is not None,
+                pure_hw_time_ms=slack_qpu_result.get('qpu_anneal_ms')
             ))
         except Exception:
             slack_qpu_time = (time.perf_counter() - start) * 1000
@@ -1421,9 +1429,11 @@ def run_benchmark(
         )
         try:
             pasqal_pulser_result = pasqal_optimizer.solve_pulser(n_shots=50)
-            # Report the pulse-sequence duration (hardware time), not the
-            # Qutip emulation wall-clock.
-            pasqal_pulser_hw_ms = pasqal_pulser_result.get('hardware_time_ms')
+            # Primary = ESTIMATED total neutral-atom hardware time (50 shots
+            # x register-cycle), parenthetical = pure pulse duration. The
+            # total is an estimate (emulator can't measure apparatus time);
+            # the pulse part is exact.
+            pasqal_pulser_hw_ms = pasqal_pulser_result.get('hw_total_ms')
             pasqal_pulser_time = pasqal_pulser_hw_ms if pasqal_pulser_hw_ms is not None else (time.perf_counter() - start) * 1000
             pasqal_pulser_selection = [
                 i for i, x in enumerate(pasqal_pulser_result['selection']) if x == 1
@@ -1431,7 +1441,8 @@ def run_benchmark(
             results.append(make_result(
                 "Pasqal-Pulser", pasqal_pulser_selection, pasqal_pulser_time,
                 pasqal_pulser_result.get('energy', 0.0),
-                hw_time=pasqal_pulser_hw_ms is not None
+                hw_time=pasqal_pulser_hw_ms is not None,
+                pure_hw_time_ms=pasqal_pulser_result.get('hw_pure_ms')
             ))
         except Exception:
             pasqal_pulser_time = (time.perf_counter() - start) * 1000
@@ -1497,9 +1508,9 @@ def print_results_table(results: List[BenchmarkResult], title: str = "Benchmark 
     best_score = max(r.total_score for r in feasible) if feasible else 0.0
 
     # Header
-    header = f"{'Solver':<15} {'Score':>8} {'Gap%':>7} {'Price':>8} {'Dur':>6} {'#':>3} {'Budget':>8} {'Dur':>6} {'Card':>6} {'Feas':>6} {'Time(ms)':>10}"
+    header = f"{'Solver':<15} {'Score':>8} {'Gap%':>7} {'Price':>8} {'Dur':>6} {'#':>3} {'Budget':>8} {'Dur':>6} {'Card':>6} {'Feas':>6} {'Time(ms)':>20}"
     print(header)
-    print("-" * 110)
+    print("-" * 120)
 
     for r in results:
         budget_str = "OK" if r.budget_satisfied else "FAIL"
@@ -1514,9 +1525,16 @@ def print_results_table(results: List[BenchmarkResult], title: str = "Benchmark 
         else:
             gap_str = "    N/A"
 
-        # Hardware-time rows (D-Wave QPU access time, Pasqal pulse
-        # duration) are marked with * to distinguish them from wall-clock.
-        time_str = f"{r.runtime_ms:.2f}{'*' if r.hw_time else ''}"
+        # Hardware-time rows are marked with *. When a pure
+        # coherent-evolution time is available, show it in parentheses:
+        # "total (pure)*" — total = full hardware engagement, pure = the
+        # anneal (D-Wave) or pulse (Pasqal) evolution alone.
+        if r.hw_time and r.pure_hw_time_ms is not None:
+            time_str = f"{r.runtime_ms:.2f} ({r.pure_hw_time_ms:.4f})*"
+        elif r.hw_time:
+            time_str = f"{r.runtime_ms:.2f}*"
+        else:
+            time_str = f"{r.runtime_ms:.2f}"
 
         row = (
             f"{r.solver_name:<15} "
@@ -1529,16 +1547,20 @@ def print_results_table(results: List[BenchmarkResult], title: str = "Benchmark 
             f"{dur_str:>6} "
             f"{card_str:>6} "
             f"{feas_str:>6} "
-            f"{time_str:>10}"
+            f"{time_str:>20}"
         )
         print(row)
 
-    print("-" * 110)
+    print("-" * 120)
 
-    # Legend for the hardware-time marker, only when present.
+    # Legend for the hardware-time markers, only when present.
     if any(r.hw_time for r in results):
-        print("* Time(ms) is hardware time (D-Wave QPU access time or Pasqal "
-              "pulse-sequence duration), not wall-clock.")
+        print("* Time(ms) = hardware time, not wall-clock. Format: total (pure).")
+        print("    D-Wave QPU rows: total = qpu_access_time (real, incl. "
+              "programming + readout); pure = per-sample anneal (~20 us).")
+        print("    Pasqal-Pulser:   total = ESTIMATED 50 shots x ~30 ms "
+              "register cycle (load/rearrange/readout); pure = pulse "
+              "duration (exact).")
 
     # Find best feasible solution
     if feasible:

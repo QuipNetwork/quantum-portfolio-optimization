@@ -483,11 +483,19 @@ class SimplePortfolioQUBO:
         total_duration = np.sum(self.durations[selected_indices]) if len(selected_indices) > 0 else 0.0
         total_score = np.sum(self.scores[selected_indices]) if len(selected_indices) > 0 else 0.0
 
-        # Actual QPU time (microseconds) reported by the sampler, converted
-        # to ms. This is the hardware cost — far smaller than wall-clock,
-        # which is dominated by network round-trip and Leap queue time.
-        qpu_access_us = sampleset.info.get('timing', {}).get('qpu_access_time')
+        # QPU timing (microseconds -> ms). Two figures:
+        #   qpu_access_ms = total QPU engagement: programming + all reads'
+        #                   (anneal + readout + delay). The full hardware
+        #                   cost, far smaller than wall-clock (which adds
+        #                   network round-trip + Leap queue).
+        #   qpu_anneal_ms = pure annealing time for a SINGLE sample (the
+        #                   coherent-evolution analogue of Pasqal's pulse
+        #                   duration). ~20 us by default.
+        timing = sampleset.info.get('timing', {})
+        qpu_access_us = timing.get('qpu_access_time')
+        qpu_anneal_us = timing.get('qpu_anneal_time_per_sample')
         qpu_access_ms = qpu_access_us / 1000.0 if qpu_access_us is not None else None
+        qpu_anneal_ms = qpu_anneal_us / 1000.0 if qpu_anneal_us is not None else None
 
         return {
             'selection': selection,
@@ -498,6 +506,7 @@ class SimplePortfolioQUBO:
             'total_score': total_score,
             'num_selected': len(selected_assets),
             'qpu_access_ms': qpu_access_ms,
+            'qpu_anneal_ms': qpu_anneal_ms,
             'sampleset': sampleset
         }
 

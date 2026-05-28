@@ -192,6 +192,18 @@ from simple_portfolio_qubo import (
 # Qutip state-vector cost scales as 2^n; n>12 takes minutes per shot.
 _PULSER_MAX_N = 12
 
+# Estimated neutral-atom register-cycle time per shot: atom loading +
+# tweezer rearrangement (tens of ms, defect-free assembly) + state prep
+# + fluorescence readout (the dominant, ms-scale component). The pulse
+# evolution itself is ~microseconds and negligible against this. Modern
+# neutral-atom demos run at ~30-50 cycles/second (~20-33 ms/cycle), so
+# 30 ms is a representative per-shot figure. This is a fixed HARDWARE
+# cost the local Qutip emulator does not (and cannot) model, so we add
+# it as a documented estimate when reporting hardware-equivalent time.
+# Source: neutral-atom cycle-time literature (readout-dominated,
+# ~30-50 cycles/s); see e.g. arXiv:2510.25982.
+_NEUTRAL_ATOM_CYCLE_MS = 30.0
+
 # Hard cap on Pasqal-Slack problem size. The slack QUBO matrix adds
 # log2(B/precision) bits per constraint × 3 constraints ≈ 15-20 extra
 # variables at default coarse precision. qubosolver's LocalEmulator
@@ -762,10 +774,18 @@ class PasqalPortfolioOptimizer:
         register, device, _blockade = self._build_pulser_register()
         sequence = self._build_adiabatic_sequence(register, device)
 
-        # Hardware-equivalent time: the pulse-sequence duration (ns -> ms)
-        # that this protocol would take on real neutral-atom hardware,
-        # independent of the classical Qutip emulation wall-clock.
-        hardware_time_ms = sequence.get_duration() / 1e6
+        # Hardware-equivalent time. Two figures:
+        #   hw_pure_ms  = the pulse-sequence (coherent evolution) duration
+        #                 alone — the analogue of D-Wave's per-sample
+        #                 anneal time. Microseconds.
+        #   hw_total_ms = estimated FULL hardware time for all n_shots:
+        #                 each shot needs a fresh register cycle (load +
+        #                 rearrange + prep + readout, ~_NEUTRAL_ATOM_CYCLE_MS)
+        #                 because fluorescence readout destroys the register.
+        #                 This is an ESTIMATE (the emulator cannot measure
+        #                 real apparatus timing); the pulse part is exact.
+        hw_pure_ms = sequence.get_duration() / 1e6
+        hw_total_ms = n_shots * (_NEUTRAL_ATOM_CYCLE_MS + hw_pure_ms)
 
         backend = QutipBackendV2(sequence)
         result = backend.run()
@@ -797,5 +817,6 @@ class PasqalPortfolioOptimizer:
         energy = self._compute_energy(selection)
         is_feasible = self._is_feasible(selection)
         result = self._build_result(selection, energy, is_feasible)
-        result['hardware_time_ms'] = hardware_time_ms
+        result['hw_total_ms'] = hw_total_ms
+        result['hw_pure_ms'] = hw_pure_ms
         return result
