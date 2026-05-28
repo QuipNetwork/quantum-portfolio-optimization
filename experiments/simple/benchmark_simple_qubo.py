@@ -467,6 +467,172 @@ def print_qubit_table(qubit_info: List[QubitInfo], n_assets: int):
     print()
 
 
+def print_qubo_info(
+    assets: List[Dict[str, Any]],
+    constraints: Dict[str, Any],
+    max_full_matrix_n: int = 16,
+):
+    """Print the QUBO matrix and its key statistics.
+
+    This is the exact problem object the penalty-matrix solvers consume:
+    dwave-neal SA, cuOpt-QP, Phi-QUBO, and Pasqal-QUBO all receive this
+    same Q. Pasqal's qubosolver in particular receives np.triu(Q) (the
+    upper triangle) and embeds it onto a Rydberg atom register, mapping
+    diagonal terms to per-atom detuning and off-diagonal terms to atom
+    spacings. Inspecting Q here lets you reason about that embedding
+    before it disappears into the solver.
+
+    Args:
+        assets: Asset dicts (id, price, duration, score).
+        constraints: Dict with budget, max_duration, max_cardinality, and
+            optional lambda_budget/duration/cardinality.
+        max_full_matrix_n: Print the full matrix only up to this size;
+            above it, print summary statistics only.
+    """
+    optimizer = SimplePortfolioQUBO(
+        assets=assets,
+        budget=constraints["budget"],
+        max_duration=constraints["max_duration"],
+        max_cardinality=constraints["max_cardinality"],
+        lambda_budget=constraints.get("lambda_budget", 2.0),
+        lambda_duration=constraints.get("lambda_duration", 10.0),
+        lambda_cardinality=constraints.get("lambda_cardinality", 5.0),
+    )
+
+    Q = optimizer.build_qubo_matrix()
+    Q_upper = np.triu(Q)
+    n = optimizer.n
+    asset_ids = [a.id for a in optimizer.assets]
+
+    width = 100
+    print(f"\n{'=' * width}")
+    print(f" QUBO Matrix (n={n} assets, soft-penalty formulation)")
+    print(f"{'=' * width}")
+    print(f"  Penalty weights: lambda_budget={optimizer.lambda_b}, "
+          f"lambda_duration={optimizer.lambda_d}, "
+          f"lambda_cardinality={optimizer.lambda_c}")
+
+    diag = np.diag(Q)
+    off = Q_upper[np.triu_indices(n, k=1)]
+    print(f"\n  Diagonal terms Q[i,i] (per-asset: -score + penalties):")
+    for i, aid in enumerate(asset_ids):
+        print(f"    {aid:<6} {diag[i]:>14.4f}")
+    print(f"\n  Diagonal range:     [{diag.min():.4f}, {diag.max():.4f}]")
+    if off.size:
+        print(f"  Off-diagonal range: [{off.min():.4f}, {off.max():.4f}]  "
+              f"(pairwise couplings, upper triangle)")
+
+    if n <= max_full_matrix_n:
+        print(f"\n  Full symmetric matrix Q:")
+        header = "        " + "".join(f"{aid:>11}" for aid in asset_ids)
+        print(header)
+        for i, aid in enumerate(asset_ids):
+            row = "".join(f"{Q[i, j]:>11.3f}" for j in range(n))
+            print(f"    {aid:<4}{row}")
+    else:
+        print(f"\n  (Full matrix suppressed for n > {max_full_matrix_n}; "
+              f"showing statistics only.)")
+
+    # Ising view + QPU compression ratio: same numbers the README's
+    # D-Wave normalization section discusses, and a proxy for how hard
+    # the off-diagonal magnitudes are to realize physically (large
+    # compression => couplings span a wide dynamic range).
+    info = optimizer.get_normalization_info()
+    print(f"\n  Ising (h, J) view:")
+    print(f"    h range (original):  "
+          f"[{info['original_h_range'][0]:.4f}, "
+          f"{info['original_h_range'][1]:.4f}]")
+    print(f"    J range (original):  "
+          f"[{info['original_j_range'][0]:.4f}, "
+          f"{info['original_j_range'][1]:.4f}]")
+    print(f"    Compression to fit Advantage2 (h in [-6,6], J in [-1,1]): "
+          f"{info['compression_ratio']:.1f}x")
+    print()
+
+
+def print_slack_qubo_info(
+    assets: List[Dict[str, Any]],
+    constraints: Dict[str, Any],
+    budget_precision: float = 1.0,
+    duration_precision: float = 5.0,
+    max_full_matrix_n: int = 16,
+):
+    """Print the slack-variable QUBO matrix and its qubit budget.
+
+    This is the matrix the Pasqal-Slack path (solve_qubo_slack) feeds to
+    qubosolver. Unlike the soft-penalty QUBO, it adds binary slack
+    variables that turn each <= constraint into an exact equality, so
+    the variable count grows beyond the n assets. The default
+    precisions here (budget 1.0, duration 5.0) match solve_qubo_slack's
+    coarse defaults so the qubit count shown equals what Pasqal-Slack
+    actually builds. (The dwave-neal SA path uses finer 0.1 / 1.0
+    precision, which produces more slack bits.)
+
+    Args:
+        assets: Asset dicts (id, price, duration, score).
+        constraints: Dict with budget, max_duration, max_cardinality, and
+            optional lambda_budget/duration/cardinality.
+        budget_precision: Slack discretization step for budget.
+        duration_precision: Slack discretization step for duration.
+        max_full_matrix_n: Print the full matrix only up to this size.
+    """
+    optimizer = SlackPortfolioQUBO(
+        assets=assets,
+        budget=constraints["budget"],
+        max_duration=constraints["max_duration"],
+        max_cardinality=constraints["max_cardinality"],
+        lambda_budget=constraints.get("lambda_budget", 2.0),
+        lambda_duration=constraints.get("lambda_duration", 10.0),
+        lambda_cardinality=constraints.get("lambda_cardinality", 5.0),
+        budget_precision=budget_precision,
+        duration_precision=duration_precision,
+    )
+
+    vi = optimizer.get_variable_info()
+    Q = optimizer.build_qubo_matrix()
+    nt = optimizer.n_total
+
+    width = 100
+    print(f"\n{'=' * width}")
+    print(f" Slack-Variable QUBO Matrix (Pasqal-Slack path)")
+    print(f"{'=' * width}")
+    print(f"  Slack precision: budget={budget_precision}, "
+          f"duration={duration_precision}, cardinality=1 "
+          f"(matches solve_qubo_slack defaults)")
+    print(f"\n  Qubit (variable) budget:")
+    print(f"    Asset bits:            {vi['n_assets']:>3}   "
+          f"indices {vi['asset_range']}")
+    print(f"    Budget slack bits:     {vi['n_budget_slack']:>3}   "
+          f"indices {vi['budget_slack_range']}")
+    print(f"    Duration slack bits:   {vi['n_duration_slack']:>3}   "
+          f"indices {vi['duration_slack_range']}")
+    print(f"    Cardinality slack bits:{vi['n_cardinality_slack']:>3}   "
+          f"indices {vi['cardinality_slack_range']}")
+    print(f"    {'-' * 40}")
+    print(f"    TOTAL qubits:          {nt:>3}   "
+          f"({vi['n_assets']} asset + "
+          f"{nt - vi['n_assets']} slack)")
+
+    diag = np.diag(Q)
+    off = np.triu(Q, k=1)
+    off_nz = off[off != 0]
+    print(f"\n  Matrix is {nt}x{nt}.")
+    print(f"  Diagonal range:     [{diag.min():.4f}, {diag.max():.4f}]")
+    if off_nz.size:
+        print(f"  Off-diagonal range: [{off_nz.min():.4f}, "
+              f"{off_nz.max():.4f}]  (nonzero couplings, upper triangle)")
+
+    if nt <= max_full_matrix_n:
+        print(f"\n  Full symmetric matrix Q ({nt}x{nt}):")
+        for i in range(nt):
+            row = "".join(f"{Q[i, j]:>9.2f}" for j in range(nt))
+            print(f"    {i:>3}{row}")
+    else:
+        print(f"\n  (Full matrix suppressed for size > {max_full_matrix_n}; "
+              f"showing statistics only.)")
+    print()
+
+
 def brute_force_solve(
     assets: List[Dict[str, Any]],
     budget: float,
@@ -1628,6 +1794,18 @@ def main():
         action="store_true",
         help="Skip qubit requirements table"
     )
+    parser.add_argument(
+        "--show-qubo",
+        action="store_true",
+        help="Print the QUBO matrix and Ising/compression stats before "
+             "solving (the same Q consumed by SA, cuOpt, Phi, and Pasqal)"
+    )
+    parser.add_argument(
+        "--show-slack-qubo",
+        action="store_true",
+        help="Print the slack-variable QUBO matrix and its qubit budget "
+             "(the matrix consumed by the Pasqal-Slack path)"
+    )
 
     args = parser.parse_args()
 
@@ -1665,6 +1843,12 @@ def main():
             if not args.no_qubits:
                 qubit_info = compute_qubit_requirements(assets, constraints)
                 print_qubit_table(qubit_info, len(assets))
+
+            if args.show_qubo:
+                print_qubo_info(assets, constraints)
+
+            if args.show_slack_qubo:
+                print_slack_qubo_info(assets, constraints)
 
         trial_seed = args.seed + trial if args.seed is not None else None
         results = run_benchmark(
