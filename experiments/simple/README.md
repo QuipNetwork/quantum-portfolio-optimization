@@ -6,11 +6,38 @@ This document describes an implementation of QUBO matrix construction for portfo
 
 ## Installation
 
+### Python version
+
+**Use Python 3.12.** The optional solver integrations below have
+overlapping version constraints, and 3.12 is the only currently-
+supported version that satisfies all of them:
+
+- cuOpt: 3.10–3.12 (no 3.13+ wheels published)
+- QHDOPT: 3.10–3.12 stock; 3.13 only works with the `--no-deps`
+  workaround in `linux-instructions.md` §3
+- Pasqal `qubo-solver`: caps at `<=3.14` strictly (so 3.14.x patch
+  releases like 3.14.4 are rejected); most versions cap at `<3.13`
+- PhiSolve, NL, CQM, `dimod`: 3.10+
+
+Python 3.13 works if you only need Pasqal and accept the QHDOPT
+workaround. Python 3.14 does not work for any of the optional
+solver wheels currently published. If your `python3` defaults to
+3.13 or 3.14 (common on Ubuntu 24.04+ and recent macOS),
+explicitly invoke `python3.12` when creating the venv:
+
+```bash
+# If python3.12 is not installed:
+#   Ubuntu/Debian:  sudo apt install python3.12 python3.12-venv
+#   macOS:          brew install python@3.12
+
+python3.12 -m venv venv               # not `python3 -m venv venv`
+source venv/bin/activate              # On Windows: venv\Scripts\activate
+python --version                      # confirm: Python 3.12.x
+```
+
 ### Core dependencies (required for QUBO/Slack/CQM/NL paths)
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install numpy dimod dwave-neal dwave-system dwave-optimization scipy pytest
 ```
 

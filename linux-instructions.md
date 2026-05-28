@@ -16,9 +16,21 @@ match what landed on `feat/add-qhd-cuopt-phisolve-solvers`.
   Ampere, and Hopper all fine) — cuOpt only
 - NVIDIA driver supporting CUDA 12.x (`nvidia-smi` should report
   Driver Version >= 525) — cuOpt only
-- Python 3.10–3.12 if you need cuOpt; otherwise 3.10–3.13 works.
-  QHDOPT requires the workaround in §3 on Python 3.13 due to a
-  hard-pin of `numpy<1.28` that conflicts with numpy 2.x.
+- **Python 3.12 is the recommended target for this setup.** Each
+  optional solver has its own version constraints, and 3.12 is the
+  only version inside all of them simultaneously:
+    - cuOpt: 3.10–3.12 (no 3.13+ wheels published)
+    - QHDOPT: 3.10–3.12 stock; 3.13 needs the `--no-deps` workaround
+      in §3 because qhdopt 0.0.1 hard-pins `numpy<1.28` and
+      `scipy==1.11.4` which don't build on 3.13
+    - Pasqal qubo-solver: most versions cap at `<3.13`; the 0.7.x
+      versions advertise `<=3.14` but pip interprets that strictly
+      (3.14.0 only, not 3.14.x patches) — so 3.14 is effectively
+      unsupported and 3.12 stays the safe choice
+    - PhiSolve, NL, CQM, dimod: 3.10+
+  If you only need Pasqal (skipping cuOpt), Python 3.13 works with
+  the QHDOPT workaround. Python 3.14 does not work for any of the
+  optional solver wheels currently published.
 
 ## 1. Clone and check out the branch
 
@@ -30,10 +42,17 @@ git switch feat/add-pasqal-solvers   # most recent, includes everything
 
 ## 2. Set up a Python environment for the experiments
 
+If you already have an `experiments/simple/.venv` on a different
+Python version (commonly happens because `python3` on Ubuntu 24.04+
+and recent macOS defaults to 3.13 or 3.14), delete and recreate it
+with the version that satisfies every solver:
+
 ```bash
 cd experiments/simple
-python3 -m venv .venv
+rm -rf .venv                          # or use `trash .venv` on macOS
+python3.12 -m venv .venv              # NOT `python3 -m venv .venv`
 source .venv/bin/activate
+python --version                      # confirm: Python 3.12.x
 pip install --upgrade pip
 
 # Base dependencies for existing solvers
@@ -41,16 +60,27 @@ pip install numpy scipy dimod dwave-neal dwave-system dwave-optimization \
             pytest sympy jax "jax[cuda12]"
 ```
 
+If `python3.12` is not found, install it first:
+
+```bash
+# Ubuntu 22.04+ / Debian
+sudo apt install python3.12 python3.12-venv
+
+# macOS (Homebrew)
+brew install python@3.12
+```
+
 ## 3. Install QHDOPT
 
-On Python 3.10–3.12:
+On Python 3.12 (recommended):
 
 ```bash
 pip install qhdopt
 ```
 
-**On Python 3.13** you have to bypass two broken pins (`numpy<1.28`
-and `scipy==1.11.4`, neither of which builds on 3.13). The
+**On Python 3.13** (only if you skipped cuOpt and chose 3.13 over
+3.12) you have to bypass two broken pins (`numpy<1.28` and
+`scipy==1.11.4`, neither of which builds on 3.13). The qhdopt
 runtime works fine with newer numpy / scipy:
 
 ```bash
