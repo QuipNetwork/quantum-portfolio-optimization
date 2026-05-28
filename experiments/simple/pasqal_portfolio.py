@@ -19,26 +19,122 @@
 """
 Pasqal neutral-atom portfolio optimizers.
 
-Three solver paths, all running on local emulators:
+Four solver paths exposed to the experiments/simple benchmark
+(Pasqal-QUBO, Pasqal-Slack, Pasqal-MIS, Pasqal-Pulser). All run on
+local emulators — no Pasqal cloud account required. Two of the four
+are directly comparable to the other QUBO rows in the benchmark
+(cuopt, QHD, Phi); two are problem reformulations included for
+completeness and should be read with the caveats below.
 
-1. solve_qubo  — qubosolver LocalEmulator on the QUBO penalty matrix.
-                 COMPARABLE to cuopt/phi/qhd benchmark rows.
 
-2. solve_mis   — Maximum Independent Set on a pairwise budget-conflict
-                 graph, followed by score-aware greedy post-selection.
-                 NOT COMPARABLE: only pairwise constraints are encoded
-                 in the quantum step; scores and multi-asset budget
-                 interactions are post-processed classically.
+Pasqal-QUBO (solve_qubo) — comparable
+-------------------------------------
 
-3. solve_pulser — Hand-built Rydberg adiabatic pulse sequence on a
-                  1D atom register encoding the same conflict graph
-                  as solve_mis. Bounded by Qutip emulation cost
-                  (n <= 12). NOT COMPARABLE for the same reasons as
-                  solve_mis plus encoding lossiness from 1/r^6
-                  interactions.
+Backend: qubo-solver 0.5.x (PyPI name; imported as `qubosolver`) with
+LocalEmulator (neutral-atom emulator running locally).
 
-See PASQAL_NOTES.md for the client-facing writeup of what each path
-actually measures.
+Input: the same QUBO penalty matrix used by D-Wave SA, cuOpt-QP, and
+Phi-QUBO — soft penalties for budget, duration, and cardinality from
+SimplePortfolioQUBO.
+
+Two implementation details worth knowing about, both fixed here:
+
+1. Matrix convention. build_qubo_matrix() returns a SYMMETRIC matrix
+   where each off-diagonal coupling lives in both Q[i,j] and Q[j,i].
+   dwave-neal's BQM consumes the upper triangle once; qubosolver
+   evaluates x^T Q x directly, which double-counts symmetric pairs.
+   We pass np.triu(Q) to QUBOInstance so the energy landscape Pasqal
+   sees matches the one D-Wave SA sees.
+
+2. Sample selection. qubosolver returns multiple bitstrings sorted by
+   QUBO cost. The lowest-cost bitstring isn't guaranteed to be the
+   best portfolio — the soft penalty matrix can have its minimum at a
+   suboptimal selection. _pick_best_feasible() iterates ALL returned
+   bitstrings and returns the highest-portfolio-score feasible one.
+   O(k·n) per call, negligible next to the solver runtime.
+
+
+Pasqal-Slack (solve_qubo_slack) — comparable, but tradeoff
+----------------------------------------------------------
+
+Backend: qubo-solver LocalEmulator on the SlackPortfolioQUBO matrix
+instead of SimplePortfolioQUBO.
+
+The slack formulation converts each ≤ constraint into an = constraint
+via auxiliary binary slack variables — eliminating the "penalty
+pushes toward equality with target" bias of the simple penalty
+matrix. The slack QUBO's global minimum aligns with the true
+portfolio optimum (D-Wave SA confirms this on the same matrix).
+
+Tradeoff: the slack matrix is much larger (asset bits + log2(B/prec)
+slack bits per constraint × 3 constraints). qubosolver's emulator
+scales poorly past ~20 total variables — empirically n=5 takes 3 s,
+n=12 takes 2.4 HOURS at default coarse precision (1.0 / 5.0).
+solve_qubo_slack hard-caps at n <= 8 (see _SLACK_MAX_N) to keep
+benchmark runs practical.
+
+Lesson for the client: "formulation quality" and "solver quality"
+multiply, not add. A correct formulation paired with a solver that
+under-samples the larger space can be empirically worse than a
+biased formulation paired with a thorough solver.
+
+
+Pasqal-MIS (solve_mis) — NOT directly comparable
+-------------------------------------------------
+
+Backend: maximum-independent-set 0.3.x with the local Qutip emulator.
+
+The portfolio problem is re-encoded as a pairwise asset-conflict
+graph (see _build_conflict_graph): nodes are assets, edges connect
+pairs whose combined price exceeds the budget OR whose combined
+duration exceeds the max-duration constraint. The quantum step finds
+a Maximum Independent Set of that graph — the largest set of
+mutually non-conflicting assets.
+
+The MIS encoding is a relaxation:
+  - It only captures PAIRWISE constraints. Multi-asset budget
+    interactions (e.g., three cheap assets that together exceed the
+    budget) are not represented.
+  - The cardinality constraint is not encoded in the quantum step.
+  - Asset scores are not encoded at all — MIS is unweighted.
+
+After the quantum step, _score_aware_post_selection takes the
+returned independent set and greedily picks assets in decreasing
+score order until the next would violate any full constraint
+(budget, duration, cardinality). This recovers some score signal,
+but the optimization itself was unweighted. Empirically the MIS
+encoding hits the global optimum when the optimal portfolio happens
+to be pairwise-feasible (often the case for the problem sizes here).
+
+
+Pasqal-Pulser (solve_pulser) — NOT directly comparable; n <= 12
+---------------------------------------------------------------
+
+Backend: raw pulser 1.6.x with the local QutipBackendV2 simulator.
+
+A 1D atom register is built that mirrors the same pairwise conflict
+graph as Pasqal-MIS — conflicting pairs placed within Rydberg
+blockade radius, non-conflicting pairs outside it (see
+_build_pulser_register). A linear-detuning adiabatic sweep at
+constant Rabi amplitude is then run on the register, and the
+most-common bitstring is sampled and repaired to feasibility.
+
+Caveats on top of the Pasqal-MIS caveats:
+  - The 1D layout cannot in general realize an arbitrary conflict
+    graph (only interval-graph-like structures are exact).
+  - Rydberg interactions are 1/r^6 repulsive only — the encoded
+    "constraint" strength varies smoothly across pairs, not as a
+    hard pairwise penalty.
+  - Pulse parameters (Rabi=3 rad/µs, detuning sweep -8→+8 rad/µs,
+    duration 6 µs) are tuned so dδ/dt < Ω² (adiabatic criterion)
+    given AnalogDevice's 6000 ns sequence cap; they are NOT tuned
+    per problem instance.
+  - Local Qutip emulation cost scales as 2^n; solve_pulser caps at
+    n <= 12 (see _PULSER_MAX_N).
+
+This row is included as a demonstration that the problem CAN be
+expressed at the hardware-control level on neutral atoms, not as a
+benchmark of solver quality.
 """
 
 from typing import Any, Dict, List
