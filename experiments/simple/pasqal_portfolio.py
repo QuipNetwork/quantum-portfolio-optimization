@@ -135,6 +135,78 @@ Caveats on top of the Pasqal-MIS caveats:
 This row is included as a demonstration that the problem CAN be
 expressed at the hardware-control level on neutral atoms, not as a
 benchmark of solver quality.
+
+
+Pasqal-Pulser-DMM (solve_pulser_dmm) — weighted MIS (recommended DMM path)
+--------------------------------------------------------------------------
+
+Backend: raw pulser with the local QutipBackendV2 simulator on
+DigitalAnalogDevice (which, unlike AnalogDevice, exposes a DMM
+channel — see DEVNOTES/dmm_attachment_documentation.md §2 and the
+"Two ways to use a DMM" section there).
+
+This path does NOT embed the full QUBO matrix; it reduces the problem
+to a conflict graph instead. Embedding the full QUBO IS possible (that
+is the Pasqal-Pulser-QUBO path below), but it is delicate: the
+soft-penalty QUBO's largest off-diagonals are pairwise duration
+products (2*lambda_d*d_i*d_j), so a NAIVE fixed-Rabi embedding places
+feasible, high-value pairs CLOSE, and the Rydberg interaction —
+positive-only and, at those magnitudes, a HARD blockade rather than the
+finite penalty the QUBO intends — then forbids exciting both. The
+Pasqal-Pulser-QUBO path fixes that by adapting the pulse energy to the
+register (omega = 0.5*U_max). The weighted-MIS path here sidesteps the
+whole issue: it never asks the off-diagonal to encode anything but a
+binary "these two conflict," which the blockade represents exactly.
+
+The fix splits the problem the way neutral atoms handle it best:
+
+  - Register geometry encodes HARD pairwise feasibility (the conflict
+    graph): conflict edges within the blockade, non-conflicting pairs
+    outside it. Feasible pairs like A,E stay free to be co-excited.
+    See _embed_conflict_register_2d.
+
+  - The DMM diagonal encodes the OBJECTIVE: score-only epsilon
+    (DEVNOTES §3a), high score -> low epsilon -> encouraged. Because
+    constraints already live in the geometry, the naive score-only
+    recipe is exactly right — there is no constraint term left to
+    dominate the diagonal. This is a weighted MIS, and it prefers the
+    higher-scoring A,E over the larger-but-lower-scoring A,C,D that the
+    unweighted Pasqal-MIS path settles on.
+
+Caveats: the conflict graph is a pairwise relaxation (it does not
+encode multi-asset budget/duration or cardinality, so the dynamics can
+sample infeasible states; _pick_best_feasible then reports the best
+feasible sample), arbitrary conflict graphs are not exactly realizable
+as a 2D unit-disk graph, and Qutip emulation is 2^n. Capped at
+n <= _PULSER_DMM_MAX_N.
+
+
+Pasqal-Pulser-QUBO (solve_pulser_qubo) — manual full-QUBO embedding
+-------------------------------------------------------------------
+
+A by-hand mapping of the COMPLETE penalty QUBO onto the hardware.
+Where solve_pulser_dmm reduces the problem to a conflict graph, this
+path keeps both parts of Q:
+
+  - Off-diagonal Q[i,j] -> atom positions, by matching the Rydberg
+    interaction C6/r_ij^6 to the (symmetric) off-diagonal directly
+    (Nelder-Mead with a compactness penalty and a ring start; see
+    _embed_register_2d), then scaling the register up to honour the
+    minimum atom spacing.
+  - Diagonal Q[i,i] -> detuning. The diagonal carries a strong negative
+    linear bias (-2*lambda*b*g, built into SimplePortfolioQUBO) so
+    there is no trivial all-zeros minimum; the global sweep provides the
+    bulk detuning and a DMM adds a per-atom score tilt
+    (epsilon = normalize(-score)).
+
+The earlier naive version of this failed because it embedded the
+off-diagonal at a FIXED Rabi, which blockaded feasible high-value pairs
+apart. The fix is to tie the pulse energy scale to the register's OWN
+strongest interaction: omega = 0.5 * U_max with
+U_max = C6 / min_pairwise_distance^6, so the blockade radius tracks the
+embedded geometry instead of fighting it. Selection is the best
+feasible SAMPLE (no score-inflating repair). Capped at
+n <= _PULSER_DMM_MAX_N (2^n emulation + 2n-coordinate embedding).
 """
 
 from typing import Any, Dict, List
@@ -158,9 +230,21 @@ _PULSER_MAX_N = 12
 # n=12 takes 2.4 hours. Cap at n=8 to keep benchmark runs reasonable.
 _SLACK_MAX_N = 8
 
+# Hard cap on the DMM Pulser paths (solve_pulser_dmm weighted-MIS and
+# solve_pulser_qubo manual QUBO embedding). Two independent costs bite:
+# Qutip emulation is 2^n, and the Nelder-Mead register embedding
+# optimizes 2n coordinates and degrades in quality as n grows.
+_PULSER_DMM_MAX_N = 10
+
 
 class PasqalPortfolioOptimizer:
-    """Portfolio optimizer with three Pasqal-flavored solver paths."""
+    """Portfolio optimizer with six Pasqal-flavored solver paths.
+
+    QUBO and Slack (qubosolver), MIS and Pulser (conflict graph),
+    Pulser-DMM (weighted MIS: conflict-graph register + score DMM), and
+    Pulser-QUBO (manual full-QUBO embedding: off-diagonal -> atom
+    positions, diagonal -> DMM detuning). See the module docstring.
+    """
 
     def __init__(
         self,
@@ -282,6 +366,12 @@ class PasqalPortfolioOptimizer:
         3. If any feasible candidate exists, return the highest-score one.
         4. Otherwise, repair each candidate via _round_and_repair and
            return the best-scoring of the repaired set.
+
+        Repair is a last-resort fallback only (step 4): when the solver
+        returns at least one feasible bitstring we report the best of
+        those as sampled, so the result reflects what the dynamics
+        actually produced rather than what classical repair could
+        reconstruct from infeasible samples.
 
         This handles the common case where a Pasqal/D-Wave solver
         returns multiple low-cost bitstrings but the lowest-cost one
@@ -752,6 +842,452 @@ class PasqalPortfolioOptimizer:
         is_feasible = self._is_feasible(selection)
         return self._build_result(selection, energy, is_feasible)
 
+    # ------------------------------------------------------------------
+    # DMM-embedding Pulser paths (solve_pulser_dmm / *_slack)
+    #
+    # These encode the actual QUBO matrix on neutral atoms following
+    # DEVNOTES/dmm_attachment_documentation.md: off-diagonal -> atom
+    # positions (Rydberg C6/r^6), diagonal -> per-atom detuning via a
+    # DMM channel on DigitalAnalogDevice. See the module docstring.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_epsilon(diag: np.ndarray) -> np.ndarray:
+        """Normalize a diagonal vector to DMM weights epsilon in [0,1].
+
+        Higher diagonal -> higher epsilon -> more suppressed |1> (the
+        sign convention in DEVNOTES §3: ε↑ ⟺ diag↑ ⟺ less desirable).
+        Includes the §3d range guarantee.
+        """
+        diag = np.asarray(diag, dtype=float)
+        rng = diag.max() - diag.min()
+        if rng <= 0:
+            eps = np.zeros(len(diag))
+        else:
+            eps = (diag - diag.min()) / rng
+        eps = np.clip(eps, 0.0, 1.0)
+        assert 0.0 <= eps.min() <= eps.max() <= 1.0, (
+            f"epsilon out of range: [{eps.min()}, {eps.max()}]"
+        )
+        return eps
+
+    @staticmethod
+    def _enforce_device_geometry(coords: np.ndarray, device) -> np.ndarray:
+        """Recenter and rescale coords to satisfy device geometry.
+
+        Scales up if the closest pair is below min_atom_distance; raises
+        if the register cannot fit within max_radial_distance (the QUBO
+        off-diagonal spread is not realizable in 2D at this size).
+        """
+        from scipy.spatial.distance import pdist
+
+        coords = coords - coords.mean(axis=0)
+        d = pdist(coords)
+        if len(d):
+            dmin = d.min()
+            if 0 < dmin < device.min_atom_distance:
+                coords = coords * (device.min_atom_distance * 1.05 / dmin)
+        radial = (
+            float(np.linalg.norm(coords, axis=1).max()) if len(coords) else 0.0
+        )
+        if radial > device.max_radial_distance:
+            raise RuntimeError(
+                f"Embedded register radius {radial:.1f} um exceeds device "
+                f"max_radial_distance {device.max_radial_distance} um; the "
+                f"QUBO off-diagonal spread is not realizable in 2D at this "
+                f"size. Try fewer assets."
+            )
+        return coords
+
+    def _embed_register_2d(self, q_off: np.ndarray):
+        """Find a 2D register whose Rydberg interactions match the QUBO
+        off-diagonal directly (the manual register mapping).
+
+        Minimizes ||C6/r_ij^6 - |q_off|||  plus a small compactness
+        penalty (keeps atoms near the array centre), starting from a
+        ring layout. The fit is intentionally NOT rescaled into a device
+        "blockade window" — the pulse energy scale is instead adapted to
+        the register's own strongest interaction U_max in
+        solve_pulser_qubo, so the blockade tracks the embedded geometry
+        rather than fighting it. After the fit, the whole register is
+        scaled up if any pair is below the device minimum spacing.
+
+        Args:
+            q_off: symmetric off-diagonal coupling matrix (diagonal
+                ignored). Larger |q_off[i,j]| -> stronger desired
+                repulsion -> atoms placed closer.
+
+        Returns:
+            (pulser.Register, DigitalAnalogDevice, coords ndarray).
+        """
+        from scipy.optimize import minimize
+        from scipy.spatial.distance import pdist, squareform
+        import pulser
+        from pulser.devices import DigitalAnalogDevice
+
+        device = DigitalAnalogDevice
+        if not device.dmm_channels:
+            raise RuntimeError(f"{device.name} has no DMM channel")
+
+        m = q_off.shape[0]
+        target = np.abs(np.array(q_off, dtype=float))
+        np.fill_diagonal(target, 0.0)
+        c6 = device.interaction_coeff
+
+        def cost(flat):
+            coords = flat.reshape(m, 2)
+            dists = np.maximum(pdist(coords), 1e-6)
+            new_q = squareform(c6 / dists ** 6)
+            compact = 1e-4 * np.sum(np.linalg.norm(coords, axis=1) ** 2)
+            return float(np.linalg.norm(new_q - target) + compact)
+
+        # Ring initial guess (r0 = 15 um atoms on a circle).
+        angles = np.linspace(0, 2 * np.pi, m, endpoint=False)
+        r0 = 15.0
+        x0 = np.column_stack([r0 * np.cos(angles), r0 * np.sin(angles)]).ravel()
+        res = minimize(
+            cost, x0, method="Nelder-Mead",
+            options={"maxiter": 200000, "xatol": 0.01, "fatol": 1e-6},
+        )
+
+        coords = self._enforce_device_geometry(res.x.reshape(m, 2), device)
+        register = pulser.Register(
+            {f"q{i}": tuple(coords[i]) for i in range(m)}
+        )
+        return register, device, coords
+
+    def _build_dmm_sequence(
+        self,
+        register,
+        device,
+        epsilon: np.ndarray,
+        omega: float,
+        delta_0: float,
+        delta_f: float,
+        duration_ns: int = 4000,
+        alpha_dmm: float = 0.6,
+    ):
+        """Build a global adiabatic sequence plus a DMM detuning channel.
+
+        Follows DEVNOTES §4 (two-step DMM attach), §5 (amplitude), §6
+        (hardware clamps), and §7 (7-point InterpolatedWaveform pulse).
+
+        The energy scales (omega, delta_0, delta_f) are supplied by the
+        caller: the weighted-MIS path fixes them to a fraction of the
+        device limits, while the manual-QUBO path ties omega to the
+        register's own strongest interaction U_max so the blockade
+        tracks the embedded geometry. All three are assumed already
+        clamped to the global channel's max_amp / max_abs_detuning.
+        """
+        import pulser
+        from pulser.waveforms import InterpolatedWaveform, ConstantWaveform
+
+        n = len(epsilon)
+        ch = device.channels["rydberg_global"]
+
+        # Duration: clamp to device max and round to the clock period.
+        max_dur = getattr(device, "max_sequence_duration", None)
+        T = min(duration_ns, max_dur) if max_dur else duration_ns
+        cp = ch.clock_period
+        T = max(int(T // cp) * cp, ch.min_duration)
+
+        # §4 step 1 — spatial mask (static per-atom epsilon).
+        det_map = register.define_detuning_map(
+            {f"q{i}": float(epsilon[i]) for i in range(n)}
+        )
+
+        seq = pulser.Sequence(register, device)
+        seq.declare_channel("global", "rydberg_global")
+        # §4 step 2 — bind the spatial map to a hardware DMM channel.
+        seq.config_detuning_map(det_map, "dmm_0")
+
+        # §7 — global adiabatic pulse (Omega up/hold/down; delta swept
+        # from negative through resonance to positive).
+        omega_wf = InterpolatedWaveform(
+            T, [1e-9, omega * 0.4, omega * 0.9, omega,
+                omega * 0.7, omega * 0.3, 1e-9]
+        )
+        delta_wf = InterpolatedWaveform(
+            T, [delta_0, delta_0 * 0.7, delta_0 * 0.2, delta_f * 0.2,
+                delta_f * 0.4, delta_f * 0.7, delta_f]
+        )
+        seq.add(pulser.Pulse(omega_wf, delta_wf, phase=0.0), "global")
+
+        # §5/§6 — DMM amplitude (negative, fraction of final global
+        # detuning) with per-atom and total-array hardware clamps.
+        dmm_ch = device.dmm_channels["dmm_0"]
+        dmm_amplitude = -delta_f * alpha_dmm
+        if dmm_ch.bottom_detuning is not None:
+            dmm_amplitude = max(dmm_amplitude, dmm_ch.bottom_detuning)
+        if dmm_ch.total_bottom_detuning is not None:
+            total = float(np.sum(epsilon)) * dmm_amplitude
+            if total < dmm_ch.total_bottom_detuning and total < 0:
+                dmm_amplitude *= dmm_ch.total_bottom_detuning / total
+        # §4 step 3 — temporal DMM waveform (scaled per-atom by epsilon).
+        seq.add_dmm_detuning(ConstantWaveform(T, dmm_amplitude), "dmm_0")
+        return seq, delta_f, dmm_amplitude
+
+    def _run_dmm_backend(self, seq):
+        """Run the sequence on the local Qutip emulator, return the
+        bitstring->count dict."""
+        from pulser.backends import QutipBackendV2
+
+        result = QutipBackendV2(seq).run()
+        if not hasattr(result, 'final_bitstrings'):
+            raise RuntimeError(
+                f"QutipBackendV2.run() returned an object with no "
+                f"'final_bitstrings' attribute (got "
+                f"{type(result).__name__}). Check pulser version."
+            )
+        counts = result.final_bitstrings
+        if not counts:
+            raise RuntimeError(
+                "QutipBackendV2 returned no bitstrings on the DMM "
+                "sequence. Check register/pulse/DMM configuration."
+            )
+        return counts
+
+    def _conflict_pairs(self) -> List[tuple]:
+        """Pairwise asset conflicts: (i, j) where i and j cannot coexist
+        under a pairwise relaxation (combined price > budget OR combined
+        duration > max_duration). Same relation as _build_conflict_graph,
+        but returns plain tuples so the DMM-MWIS path needs no networkx.
+        """
+        pairs = []
+        for i in range(self.n):
+            for j in range(i + 1, self.n):
+                if (
+                    self.prices[i] + self.prices[j] > self.budget
+                    or self.durations[i] + self.durations[j] > self.max_duration
+                ):
+                    pairs.append((i, j))
+        return pairs
+
+    def _embed_conflict_register_2d(self, seed: int = 42):
+        """Place atoms so conflicting pairs are inside the Rydberg
+        blockade and non-conflicting pairs outside it.
+
+        This is the register the weighted-MIS DMM path uses. Unlike
+        _embed_register_2d (which matches the full QUBO off-diagonal and
+        ends up blockading feasible high-value pairs), the target here is
+        BINARY — strong interaction for conflict edges, weak for
+        non-edges — so the geometry encodes only hard pairwise
+        feasibility. Arbitrary conflict graphs are not exactly realizable
+        as a 2D unit-disk graph, but the binary target embeds far more
+        reliably than the full QUBO.
+
+        Returns:
+            (pulser.Register, DigitalAnalogDevice)
+        """
+        from scipy.optimize import minimize
+        from scipy.spatial.distance import pdist, squareform
+        import pulser
+        from pulser.devices import DigitalAnalogDevice
+
+        device = DigitalAnalogDevice
+        if not device.dmm_channels:
+            raise RuntimeError(f"{device.name} has no DMM channel")
+
+        m = self.n
+        c6 = device.interaction_coeff
+        # Blockade radius at the Rabi the pulse will actually use
+        # (_build_dmm_sequence drives at 0.5 * max_amp).
+        omega = 0.5 * device.channels["rydberg_global"].max_amp
+        rb = device.rydberg_blockade_radius(omega)
+
+        # Target interaction: conflict edges placed well inside blockade,
+        # non-edges well outside it.
+        r_edge = max(0.6 * rb, device.min_atom_distance * 1.1)
+        r_non = min(1.8 * rb, 2.0 * device.max_radial_distance)
+        u_edge = c6 / r_edge ** 6
+        u_non = c6 / r_non ** 6
+
+        target = np.full((m, m), u_non)
+        for (i, j) in self._conflict_pairs():
+            target[i, j] = target[j, i] = u_edge
+        np.fill_diagonal(target, 0.0)
+
+        def cost(flat):
+            coords = flat.reshape(m, 2)
+            dists = np.maximum(pdist(coords), 1e-6)
+            return float(np.linalg.norm(squareform(c6 / dists ** 6) - target))
+
+        rng = np.random.default_rng(seed)
+        spread = device.max_radial_distance / 2.0
+        best, best_cost = None, np.inf
+        for _ in range(5):
+            x0 = rng.uniform(-spread, spread, size=2 * m)
+            res = minimize(
+                cost, x0, method="Nelder-Mead",
+                options={"maxiter": 2000 * m, "xatol": 1e-3, "fatol": 1e-3},
+            )
+            if res.fun < best_cost:
+                best_cost, best = res.fun, res.x
+
+        coords = self._enforce_device_geometry(best.reshape(m, 2), device)
+        register = pulser.Register(
+            {f"q{i}": tuple(coords[i]) for i in range(m)}
+        )
+        return register, device
+
+    def solve_pulser_dmm(
+        self,
+        n_shots: int = 1000,
+        seed: int = 42,
+    ) -> Dict[str, Any]:
+        """Solve as a weighted Maximum Independent Set on a DMM register.
+
+        This is the recommended DMM path. Rather than embedding the full
+        QUBO off-diagonal (which needs the careful energy-scale handling
+        of solve_pulser_qubo to avoid blockading feasible high-value
+        pairs apart), it splits the problem the way neutral atoms handle
+        it best:
+
+          - Register geometry encodes HARD pairwise feasibility: conflict
+            edges (combined price/duration over limit) within the Rydberg
+            blockade, non-conflicting pairs outside it. The blockade then
+            forbids selecting both members of a conflicting pair, while
+            leaving feasible pairs free to be co-excited.
+
+          - The DMM diagonal encodes the OBJECTIVE: per-atom detuning with
+            score-only epsilon (DEVNOTES §3a) — high score -> low epsilon
+            -> encouraged. Constraints are already in the geometry, so the
+            naive score-only recipe is exactly right here (no constraint
+            term to dominate the diagonal). This turns the unweighted MIS
+            (which prefers more atoms, e.g. A,C,D) into a weighted MIS
+            that prefers the higher-scoring A,E.
+
+        The conflict graph is a pairwise relaxation (it does not encode
+        multi-asset budget/duration or cardinality), so the dynamics can
+        sample infeasible states; _pick_best_feasible reports the best
+        already-feasible sample (repairing only if none is feasible).
+
+        Args:
+            n_shots: Sampling shots. Currently informational — Pulser's
+                QutipBackendV2 uses EmulationConfig.default_num_shots
+                (1000); kept for API symmetry.
+            seed: RNG seed for the Nelder-Mead embedding restarts.
+
+        Raises:
+            ValueError: if n > _PULSER_DMM_MAX_N.
+
+        Returns:
+            Standard result dict (see _build_result).
+        """
+        if self.n > _PULSER_DMM_MAX_N:
+            raise ValueError(
+                f"solve_pulser_dmm capped at n <= {_PULSER_DMM_MAX_N} "
+                f"(2^n Qutip emulation + Nelder-Mead embedding of 2n "
+                f"coordinates); got n={self.n}."
+            )
+
+        register, device = self._embed_conflict_register_2d(seed=seed)
+        # Score-only epsilon (§3a): -score so high score -> low epsilon.
+        epsilon = self._normalize_epsilon(-self.scores)
+        # Fixed energy scales (fraction of device limits): the conflict
+        # register's blockade radius is sized off the same Rabi.
+        ch = device.channels["rydberg_global"]
+        omega = 0.5 * ch.max_amp
+        delta_f = 0.4 * ch.max_abs_detuning
+        seq, _df, _amp = self._build_dmm_sequence(
+            register, device, epsilon, omega, -delta_f, delta_f
+        )
+        counts = self._run_dmm_backend(seq)
+
+        candidates = [
+            np.array([int(c) for c in b], dtype=int) for b in counts
+        ]
+        selection = self._pick_best_feasible(candidates)
+        energy = self._compute_energy(selection)
+        is_feasible = self._is_feasible(selection)
+        return self._build_result(selection, energy, is_feasible)
+
+    def solve_pulser_qubo(
+        self,
+        n_shots: int = 1000,
+        seed: int = 42,
+    ) -> Dict[str, Any]:
+        """Manual full-QUBO embedding on a DMM register.
+
+        The complete penalty QUBO is mapped onto the hardware by hand,
+        rather than reduced to a conflict graph as solve_pulser_dmm does.
+
+          - Off-diagonal Q[i,j] -> atom positions. The symmetric
+            off-diagonal is matched to the Rydberg interaction C6/r_ij^6
+            by _embed_register_2d (Nelder-Mead + compactness penalty).
+          - Diagonal Q[i,i] -> detuning. The negative linear bias in the
+            diagonal (-2*lambda*b*g, built into SimplePortfolioQUBO) makes
+            selection favorable (no trivial all-zeros minimum); the global
+            sweep supplies the bulk detuning and the DMM adds a per-atom
+            score tilt (epsilon = normalize(-score)).
+
+        The key to making the embedding physical (rather than blockading
+        feasible pairs apart, as a naive fixed-Rabi embedding does) is
+        that the pulse energy scale is tied to the register's OWN
+        strongest interaction: omega = 0.5 * U_max with
+        U_max = C6 / min_pairwise_distance^6. The blockade radius then
+        tracks the embedded geometry instead of fighting it.
+
+        Selection is by best feasible SAMPLE (via _pick_best_feasible,
+        which only repairs as a last resort if nothing feasible was
+        sampled) — the reported score reflects what the dynamics
+        produced, not classical reconstruction.
+
+        Args:
+            n_shots: Sampling shots. Informational — Pulser's
+                QutipBackendV2 uses EmulationConfig.default_num_shots
+                (1000); kept for API symmetry.
+            seed: RNG seed. Currently unused — the embedding init is a
+                deterministic ring and QutipBackendV2 is unseeded; kept
+                for API symmetry.
+
+        Raises:
+            ValueError: if n > _PULSER_DMM_MAX_N.
+
+        Returns:
+            Standard result dict (see _build_result).
+        """
+        if self.n > _PULSER_DMM_MAX_N:
+            raise ValueError(
+                f"solve_pulser_qubo capped at n <= {_PULSER_DMM_MAX_N} "
+                f"(2^n Qutip emulation + Nelder-Mead embedding of 2n "
+                f"coordinates); got n={self.n}."
+            )
+
+        from scipy.spatial.distance import pdist
+
+        # Full penalty QUBO; symmetric off-diagonal drives the geometry.
+        Q = self._qubo_optimizer.build_qubo_matrix()
+        q_off = (Q + Q.T) / 2.0
+        np.fill_diagonal(q_off, 0.0)
+
+        register, device, coords = self._embed_register_2d(q_off)
+
+        # Score-only DMM tilt (constraints live in the off-diagonal).
+        epsilon = self._normalize_epsilon(-self.scores)
+
+        # Energy scale adapts to the register's strongest interaction so
+        # the blockade matches the embedded distances; clamp to the
+        # global channel limits.
+        ch = device.channels["rydberg_global"]
+        u_max = device.interaction_coeff / float(pdist(coords).min()) ** 6
+        omega = min(0.5 * u_max, 0.95 * ch.max_amp)
+        delta_0 = max(-1.5 * omega, -0.95 * ch.max_abs_detuning)
+        delta_f = min(0.8 * omega, 0.95 * ch.max_abs_detuning)
+
+        seq, _df, _amp = self._build_dmm_sequence(
+            register, device, epsilon, omega, delta_0, delta_f
+        )
+        counts = self._run_dmm_backend(seq)
+
+        candidates = [
+            np.array([int(c) for c in b], dtype=int) for b in counts
+        ]
+        selection = self._pick_best_feasible(candidates)
+        energy = self._compute_energy(selection)
+        is_feasible = self._is_feasible(selection)
+        return self._build_result(selection, energy, is_feasible)
+
 
 # Sampling each emulator path performs, for the demo summary. These are
 # fixed by the backend, not by our n_shots argument (which the lazy
@@ -760,14 +1296,16 @@ class PasqalPortfolioOptimizer:
 #     LocalEmulator() default; we pass no shot count, and solve_qubo's
 #     n_shots is documented as unused.
 #   - Pasqal-MIS:    runs=100 on the Qutip emulator (see solve_mis).
-#   - Pasqal-Pulser: 1000 shots — Pulser's EmulationConfig
-#     default_num_shots for the BitStrings observable; our n_shots is
-#     not forwarded to QutipBackendV2.
+#   - Pasqal-Pulser / Pulser-DMM / Pulser-QUBO: 1000 shots —
+#     Pulser's EmulationConfig default_num_shots for the BitStrings
+#     observable; our n_shots is not forwarded to QutipBackendV2.
 _PATH_SAMPLING = {
     "Pasqal-QUBO": "qubosolver LocalEmulator default shots (n_shots ignored)",
     "Pasqal-Slack": "qubosolver LocalEmulator default shots (n_shots ignored)",
     "Pasqal-MIS": "100 runs (Qutip emulator)",
     "Pasqal-Pulser": "1000 shots (Pulser default_num_shots; n_shots ignored)",
+    "Pasqal-Pulser-DMM": "1000 shots (Pulser default_num_shots; n_shots ignored)",
+    "Pasqal-Pulser-QUBO": "1000 shots (Pulser default_num_shots; n_shots ignored)",
 }
 
 
@@ -848,13 +1386,15 @@ def _demo_main():
         ("Pasqal-Slack", optimizer.solve_qubo_slack),
         ("Pasqal-MIS", optimizer.solve_mis),
         ("Pasqal-Pulser", optimizer.solve_pulser),
+        ("Pasqal-Pulser-DMM", optimizer.solve_pulser_dmm),
+        ("Pasqal-Pulser-QUBO", optimizer.solve_pulser_qubo),
     ]
 
-    width = 100
+    width = 110
     print("=" * width)
     print(" Pasqal Solver Results")
     print("=" * width)
-    print(f"{'Path':<16}{'Score':>8}{'Feasible':>10}{'Time(ms)':>10}  "
+    print(f"{'Path':<26}{'Score':>8}{'Feasible':>10}{'Time(ms)':>10}  "
           f"{'Picks':<18}Sampling")
     print("-" * width)
     for name, fn in paths:
@@ -863,15 +1403,15 @@ def _demo_main():
             r = fn()
             elapsed = (time.perf_counter() - start) * 1000
             picks = ",".join(r['selected_assets']) or "(none)"
-            print(f"{name:<16}{r['total_score']:>8.1f}"
+            print(f"{name:<26}{r['total_score']:>8.1f}"
                   f"{str(r['is_feasible']):>10}{elapsed:>10.1f}  "
                   f"{picks:<18}{_PATH_SAMPLING[name]}")
         except ImportError as e:
-            print(f"{name:<16}{'SKIPPED':>8}{'—':>10}{'—':>10}  "
+            print(f"{name:<26}{'SKIPPED':>8}{'—':>10}{'—':>10}  "
                   f"{'(lib missing)':<18}{e}")
         except Exception as e:
             elapsed = (time.perf_counter() - start) * 1000
-            print(f"{name:<16}{'FAIL':>8}{'—':>10}{elapsed:>10.1f}  "
+            print(f"{name:<26}{'FAIL':>8}{'—':>10}{elapsed:>10.1f}  "
                   f"{'':<18}{type(e).__name__}: {e}")
     print("-" * width)
 

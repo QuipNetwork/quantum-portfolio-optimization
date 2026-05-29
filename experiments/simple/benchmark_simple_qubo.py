@@ -1603,6 +1603,77 @@ def run_benchmark(
             cardinality_satisfied=False, is_feasible=False
         ))
 
+    # 19. Pasqal-Pulser-DMM — full QUBO embedded on a DMM register (n<=10)
+    if _HAS_PASQAL:
+        start = time.perf_counter()
+        pasqal_optimizer = PasqalPortfolioOptimizer(
+            assets=assets, **pasqal_constraints
+        )
+        try:
+            pasqal_dmm_result = pasqal_optimizer.solve_pulser_dmm()
+            pasqal_dmm_time = (time.perf_counter() - start) * 1000
+            pasqal_dmm_selection = [
+                i for i, x in enumerate(pasqal_dmm_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "Pasqal-Pulser-DMM", pasqal_dmm_selection, pasqal_dmm_time,
+                pasqal_dmm_result.get('energy', 0.0)
+            ))
+        except Exception:
+            pasqal_dmm_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="Pasqal-Pulser-DMM", selected_assets=[], total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=pasqal_dmm_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="Pasqal-Pulser-DMM", selected_assets=[], total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
+    # 20. Pasqal-Pulser-QUBO — manual full-QUBO embedding on a DMM register
+    if _HAS_PASQAL:
+        start = time.perf_counter()
+        pasqal_optimizer = PasqalPortfolioOptimizer(
+            assets=assets, **pasqal_constraints
+        )
+        try:
+            pasqal_pq_result = pasqal_optimizer.solve_pulser_qubo()
+            pasqal_pq_time = (time.perf_counter() - start) * 1000
+            pasqal_pq_selection = [
+                i for i, x in enumerate(pasqal_pq_result['selection']) if x == 1
+            ]
+            results.append(make_result(
+                "Pasqal-Pulser-QUBO", pasqal_pq_selection,
+                pasqal_pq_time,
+                pasqal_pq_result.get('energy', 0.0)
+            ))
+        except Exception:
+            pasqal_pq_time = (time.perf_counter() - start) * 1000
+            results.append(BenchmarkResult(
+                solver_name="Pasqal-Pulser-QUBO", selected_assets=[],
+                total_score=0.0,
+                total_price=0.0, total_duration=0.0, num_selected=0,
+                energy=0.0, runtime_ms=pasqal_pq_time,
+                budget_satisfied=False, duration_satisfied=False,
+                cardinality_satisfied=False, is_feasible=False
+            ))
+    else:
+        results.append(BenchmarkResult(
+            solver_name="Pasqal-Pulser-QUBO", selected_assets=[],
+            total_score=0.0,
+            total_price=0.0, total_duration=0.0, num_selected=0,
+            energy=0.0, runtime_ms=0.0,
+            budget_satisfied=False, duration_satisfied=False,
+            cardinality_satisfied=False, is_feasible=False
+        ))
+
     return results
 
 
@@ -1649,7 +1720,7 @@ def print_results_table(results: List[BenchmarkResult], title: str = "Benchmark 
     best_score = max(r.total_score for r in feasible) if feasible else 0.0
 
     # Header
-    header = f"{'Solver':<15} {'Score':>8} {'Gap%':>7} {'Price':>8} {'Dur':>6} {'#':>3} {'Budget':>8} {'Dur':>6} {'Card':>6} {'Feas':>6} {'Time(ms)':>10}"
+    header = f"{'Solver':<24} {'Score':>8} {'Gap%':>7} {'Price':>8} {'Dur':>6} {'#':>3} {'Budget':>8} {'Dur':>6} {'Card':>6} {'Feas':>6} {'Time(ms)':>10}"
     print(header)
     print("-" * 110)
 
@@ -1667,7 +1738,7 @@ def print_results_table(results: List[BenchmarkResult], title: str = "Benchmark 
             gap_str = "    N/A"
 
         row = (
-            f"{r.solver_name:<15} "
+            f"{r.solver_name:<24} "
             f"{r.total_score:>8.1f} "
             f"{gap_str} "
             f"{r.total_price:>8.2f} "
@@ -1715,7 +1786,7 @@ def print_summary_stats(all_results: List[List[BenchmarkResult]], solver_names: 
                     gap = 100.0 * (best_score - r.total_score) / best_score
                     stats[r.solver_name]['gaps'].append(gap)
 
-    header = f"{'Solver':<15} {'Avg Score':>10} {'Avg Gap%':>10} {'Feas Rate':>10} {'Avg Time':>12} {'Std Time':>10}"
+    header = f"{'Solver':<24} {'Avg Score':>10} {'Avg Gap%':>10} {'Feas Rate':>10} {'Avg Time':>12} {'Std Time':>10}"
     print(header)
     print("-" * 115)
 
@@ -1737,7 +1808,7 @@ def print_summary_stats(all_results: List[List[BenchmarkResult]], solver_names: 
         std_time = np.std(s['times']) if s['times'] else 0.0
 
         row = (
-            f"{name:<15} "
+            f"{name:<24} "
             f"{avg_score:>10.2f} "
             f"{gap_str} "
             f"{feas_rate:>10.1%} "
@@ -1820,7 +1891,7 @@ def main():
         print(f"Seed: {args.seed}")
 
     all_results = []
-    solver_names = ["QUBO (SA)", "QUBO (QPU)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack QPU)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)", "QHD-QP", "QHD-SymPy", "cuOpt-MILP", "cuOpt-QP", "Phi-QUBO", "Phi-MIQP", "Pasqal-QUBO", "Pasqal-Slack", "Pasqal-MIS", "Pasqal-Pulser"]
+    solver_names = ["QUBO (SA)", "QUBO (QPU)", "QUBO (Filtered)", "QUBO (HighPen)", "QUBO (Slack)", "QUBO (Slack QPU)", "QUBO (Slack+Filt)", "Brute Force", "Greedy", "Random", "ILP (scipy)", "CQM (Exact)", "CQM (SA)", "NL (Exact)", "QHD-QP", "QHD-SymPy", "cuOpt-MILP", "cuOpt-QP", "Phi-QUBO", "Phi-MIQP", "Pasqal-QUBO", "Pasqal-Slack", "Pasqal-MIS", "Pasqal-Pulser", "Pasqal-Pulser-DMM", "Pasqal-Pulser-QUBO"]
 
     for trial in range(args.num_trials):
         if args.problem_set == "simple":
