@@ -142,8 +142,8 @@ Pasqal-Pulser-DMM (solve_pulser_dmm) — weighted MIS (recommended DMM path)
 
 Backend: raw pulser with the local QutipBackendV2 simulator on
 DigitalAnalogDevice (which, unlike AnalogDevice, exposes a DMM
-channel — see DEVNOTES/dmm_attachment_documentation.md §2 and the
-"Two ways to use a DMM" section there).
+channel — see DEVNOTES/DMM_QUBO_ENCODING.md §2, and §10 for how this
+repo uses the two DMM paths).
 
 This path does NOT embed the full QUBO matrix; it reduces the problem
 to a conflict graph instead. Embedding the full QUBO IS possible (that
@@ -843,12 +843,12 @@ class PasqalPortfolioOptimizer:
         return self._build_result(selection, energy, is_feasible)
 
     # ------------------------------------------------------------------
-    # DMM-embedding Pulser paths (solve_pulser_dmm / *_slack)
-    #
-    # These encode the actual QUBO matrix on neutral atoms following
-    # DEVNOTES/dmm_attachment_documentation.md: off-diagonal -> atom
-    # positions (Rydberg C6/r^6), diagonal -> per-atom detuning via a
-    # DMM channel on DigitalAnalogDevice. See the module docstring.
+    # DMM Pulser paths (solve_pulser_dmm / solve_pulser_qubo) on
+    # DigitalAnalogDevice. solve_pulser_dmm is a weighted MIS over a
+    # conflict-graph register; solve_pulser_qubo embeds the full QUBO
+    # (off-diagonal -> atom positions, diagonal -> per-atom DMM
+    # detuning). See DEVNOTES/DMM_QUBO_ENCODING.md and the module
+    # docstring.
     # ------------------------------------------------------------------
 
     @staticmethod
