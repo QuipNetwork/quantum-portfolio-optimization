@@ -55,9 +55,10 @@ source .venv/bin/activate
 python --version                      # confirm: Python 3.12.x
 pip install --upgrade pip
 
-# Base dependencies for existing solvers
-pip install numpy scipy dimod dwave-neal dwave-system dwave-optimization \
-            pytest sympy jax "jax[cuda12]"
+# Base dependencies (numpy, scipy, dimod, dwave-*, pytest, python-dotenv)
+pip install -r requirements.txt
+# Extra packages used by some optional solvers on GPU boxes:
+pip install sympy jax "jax[cuda12]"
 ```
 
 If `python3.12` is not found, install it first:

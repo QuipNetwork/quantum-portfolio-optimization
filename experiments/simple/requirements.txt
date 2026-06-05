@@ -1,0 +1,30 @@
+# Core dependencies for the experiments/simple benchmark and solvers.
+# Install with:  pip install -r requirements.txt
+#
+# Use Python 3.12 (see README.md "Python version" — it is the only
+# version inside every optional solver's constraints at once).
+
+# Numerics / classical optimization
+numpy>=1.24.0
+scipy>=1.10.0
+
+# D-Wave: BQM, simulated annealing, QPU access, non-linear model
+dimod>=0.12.0
+dwave-neal>=0.6.0
+dwave-system>=1.20.0
+dwave-optimization>=0.1.0
+
+# .env loading for the D-Wave QPU benchmark rows (DWAVE_API_TOKEN etc.)
+python-dotenv>=1.0.0
+
+# Tests
+pytest>=7.0.0
+
+# --- Optional solver integrations (NOT installed by this file) ---
+# These are version- and platform-sensitive; install separately per
+# README.md "Optional solver dependencies" / linux-instructions.md:
+#   qhdopt                                   (QHD-QP / QHD-SymPy)
+#   qubo-solver maximum-independent-set \
+#     pulser pulser-simulation qutip         (Pasqal-* rows)
+#   cuopt-cu12 (NVIDIA GPU only)             (cuOpt-* rows)
+#   OpenPhiSolve (from source)               (Phi-QUBO / Phi-MIQP)

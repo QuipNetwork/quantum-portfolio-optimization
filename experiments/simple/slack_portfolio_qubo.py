@@ -480,6 +480,13 @@ class SlackPortfolioQUBO:
         total_duration = np.sum(self.durations[selected_indices]) if len(selected_indices) > 0 else 0.0
         total_score = np.sum(self.scores[selected_indices]) if len(selected_indices) > 0 else 0.0
 
+        # QPU timing (us -> ms); see SimplePortfolioQUBO.solve_qpu.
+        timing = sampleset.info.get('timing', {})
+        qpu_access_us = timing.get('qpu_access_time')
+        qpu_anneal_us = timing.get('qpu_anneal_time_per_sample')
+        qpu_access_ms = qpu_access_us / 1000.0 if qpu_access_us is not None else None
+        qpu_anneal_ms = qpu_anneal_us / 1000.0 if qpu_anneal_us is not None else None
+
         return {
             'selection': asset_selection,
             'selected_assets': selected_assets,
@@ -489,6 +496,8 @@ class SlackPortfolioQUBO:
             'total_score': total_score,
             'num_selected': len(selected_assets),
             'slack_values': slack_values,
+            'qpu_access_ms': qpu_access_ms,
+            'qpu_anneal_ms': qpu_anneal_ms,
             'sampleset': sampleset
         }
 

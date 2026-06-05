@@ -19,12 +19,55 @@
 """
 Pasqal neutral-atom portfolio optimizers.
 
-Four solver paths exposed to the experiments/simple benchmark
-(Pasqal-QUBO, Pasqal-Slack, Pasqal-MIS, Pasqal-Pulser). All run on
-local emulators — no Pasqal cloud account required. Two of the four
-are directly comparable to the other QUBO rows in the benchmark
-(cuopt, QHD, Phi); two are problem reformulations included for
-completeness and should be read with the caveats below.
+Six solver paths exposed to the experiments/simple benchmark
+(Pasqal-QUBO, Pasqal-Slack, Pasqal-MIS, Pasqal-Pulser,
+Pasqal-Pulser-DMM, Pasqal-Pulser-QUBO). All run on local emulators —
+no Pasqal cloud account required. Two of the six are directly
+comparable to the other QUBO rows in the benchmark (cuopt, QHD, Phi);
+the other four are problem reformulations or hardware-control
+demonstrations included for completeness and should be read with the
+caveats below.
+
+
+Why an arbitrary QUBO underperforms on neutral atoms
+----------------------------------------------------
+
+The same portfolio QUBO matrix solves to the optimum on classical
+simulated annealing AND on a real D-Wave Advantage2 QPU, but only
+reaches ~80% of optimum on Pasqal-QUBO. The difference is NOT
+"embedding is hard" (D-Wave embeds too) — it is whether the
+machine's couplings are independently PROGRAMMABLE:
+
+  - D-Wave is a programmable Ising machine. Its problem Hamiltonian
+    is H = Σ h_i s_i + Σ J_ij s_i s_j, and every h_i and J_ij is an
+    independent dial. Minor-embedding maps each logical variable to
+    a chain of physical qubits; the logical couplings are realized
+    exactly on inter-chain couplers. As long as chains don't break,
+    the embedded ground state IS the logical ground state. So
+    QUBO-on-QPU == QUBO-on-SA == optimum.
+
+  - Pasqal is an analog simulator with GEOMETRIC interactions. The
+    Rydberg coupling V_ij = C6 / r_ij^6 is fixed by the physical
+    distance between atoms — you place atoms, physics sets the
+    couplings. It is always positive (repulsive), decays as 1/r^6,
+    and is geometrically coupled (moving one atom changes all its
+    pairwise interactions). An arbitrary QUBO coupling matrix (mixed
+    signs, arbitrary magnitudes, all-to-all) cannot be realized
+    exactly. qubosolver's greedy triangular-lattice embedding finds
+    a best-fit atom layout that APPROXIMATES the couplings, and that
+    approximation shifts the energy-landscape minimum off the true
+    optimum. (Per-atom detuning via the DMM handles the linear/
+    diagonal terms; it's the quadratic couplings that can't be
+    realized.)
+
+This is exactly why solve_mis works far better than solve_qubo:
+Maximum Independent Set is the NATIVE Rydberg problem (blockade =
+independence), so it maps onto the hardware with no approximation.
+Match the encoding to the hardware's native interaction and Pasqal
+shines; force an arbitrary QUBO onto it and the geometric
+approximation costs you. (D-Wave's analogue of this wall is chain
+breaks in minor-embedding, which is why Pasqal-Slack AND the larger
+QUBO-Slack-QPU row both degrade as variable count grows.)
 
 
 Pasqal-QUBO (solve_qubo) — comparable
@@ -222,6 +265,18 @@ from simple_portfolio_qubo import (
 # Hard cap on raw-Pulser problem size in local Qutip emulation.
 # Qutip state-vector cost scales as 2^n; n>12 takes minutes per shot.
 _PULSER_MAX_N = 12
+
+# Estimated neutral-atom register-cycle time per shot: atom loading +
+# tweezer rearrangement (tens of ms, defect-free assembly) + state prep
+# + fluorescence readout (the dominant, ms-scale component). The pulse
+# evolution itself is ~microseconds and negligible against this. Modern
+# neutral-atom demos run at ~30-50 cycles/second (~20-33 ms/cycle), so
+# 30 ms is a representative per-shot figure. This is a fixed HARDWARE
+# cost the local Qutip emulator does not (and cannot) model, so we add
+# it as a documented estimate when reporting hardware-equivalent time.
+# Source: neutral-atom cycle-time literature (readout-dominated,
+# ~30-50 cycles/s); see e.g. arXiv:2510.25982.
+_NEUTRAL_ATOM_CYCLE_MS = 30.0
 
 # Hard cap on Pasqal-Slack problem size. The slack QUBO matrix adds
 # log2(B/precision) bits per constraint × 3 constraints ≈ 15-20 extra
@@ -811,6 +866,19 @@ class PasqalPortfolioOptimizer:
         register, device, _blockade = self._build_pulser_register()
         sequence = self._build_adiabatic_sequence(register, device)
 
+        # Hardware-equivalent time. Two figures:
+        #   hw_pure_ms  = the pulse-sequence (coherent evolution) duration
+        #                 alone — the analogue of D-Wave's per-sample
+        #                 anneal time. Microseconds.
+        #   hw_total_ms = estimated FULL hardware time for all n_shots:
+        #                 each shot needs a fresh register cycle (load +
+        #                 rearrange + prep + readout, ~_NEUTRAL_ATOM_CYCLE_MS)
+        #                 because fluorescence readout destroys the register.
+        #                 This is an ESTIMATE (the emulator cannot measure
+        #                 real apparatus timing); the pulse part is exact.
+        hw_pure_ms = sequence.get_duration() / 1e6
+        hw_total_ms = n_shots * (_NEUTRAL_ATOM_CYCLE_MS + hw_pure_ms)
+
         backend = QutipBackendV2(sequence)
         result = backend.run()
 
@@ -840,7 +908,10 @@ class PasqalPortfolioOptimizer:
         selection = self._round_and_repair(raw.astype(float))
         energy = self._compute_energy(selection)
         is_feasible = self._is_feasible(selection)
-        return self._build_result(selection, energy, is_feasible)
+        result = self._build_result(selection, energy, is_feasible)
+        result['hw_total_ms'] = hw_total_ms
+        result['hw_pure_ms'] = hw_pure_ms
+        return result
 
     # ------------------------------------------------------------------
     # DMM Pulser paths (solve_pulser_dmm / solve_pulser_qubo) on

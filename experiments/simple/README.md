@@ -38,8 +38,14 @@ python --version                      # confirm: Python 3.12.x
 ### Core dependencies (required for QUBO/Slack/CQM/NL paths)
 
 ```bash
-pip install numpy dimod dwave-neal dwave-system dwave-optimization scipy pytest
+pip install -r requirements.txt
 ```
+
+This installs numpy, scipy, dimod, dwave-neal, dwave-system,
+dwave-optimization, pytest, and python-dotenv (the last loads `.env`
+for the D-Wave QPU benchmark rows). The optional solver integrations
+below are intentionally NOT in requirements.txt — they are
+version- and platform-sensitive and installed separately.
 
 - `dimod` - D-Wave's binary quadratic model (BQM) library
 - `dwave-neal` - Simulated annealing sampler for QUBO/Ising problems
