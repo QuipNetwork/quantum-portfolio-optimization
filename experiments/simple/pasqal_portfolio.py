@@ -288,8 +288,11 @@ _SLACK_MAX_N = 8
 # Hard cap on the DMM Pulser paths (solve_pulser_dmm weighted-MIS and
 # solve_pulser_qubo manual QUBO embedding). Two independent costs bite:
 # Qutip emulation is 2^n, and the Nelder-Mead register embedding
-# optimizes 2n coordinates and degrades in quality as n grows.
-_PULSER_DMM_MAX_N = 10
+# optimizes 2n coordinates and degrades in quality as n grows. In
+# practice the binding limit arrives sooner and per-instance: a larger
+# embedding may overflow the device's max radial distance and be
+# rejected by _enforce_device_geometry well before this cap.
+_PULSER_DMM_MAX_N = 12
 
 
 class PasqalPortfolioOptimizer:
